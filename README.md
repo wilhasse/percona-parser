@@ -47,7 +47,7 @@ The project builds a standalone tool named **`ib_parser`**. `CMakeLists.txt` def
 After building (for example):
 
 ```
-bashCopiarcmake -B build -S .
+cmake -B build -S .
 cmake --build build -j$(nproc)
 ```
 
