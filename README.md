@@ -116,8 +116,13 @@ ibd_cleanup();
 
 ### Language Bindings
 - **C/C++**: Native API (see [docs/Api_reference.md](docs/Api_reference.md))
-- **Go**: CGO bindings in `examples/go/`
+- **Go**: CGO bindings in `examples/go/` (use `run_example.sh` wrapper or set `LD_LIBRARY_PATH`)
 - **Python**: ctypes example in [docs/Examples.md](docs/Examples.md#python-example)
+
+**Runtime Note**: When using the shared library, ensure it's accessible at runtime by either:
+- Using the provided wrapper scripts (`run_example.sh`)
+- Setting `LD_LIBRARY_PATH` to the build directory
+- Installing the library system-wide
 
 ### Documentation
 - **[Library Usage Guide](docs/Library_usage.md)** - Detailed usage instructions

@@ -186,6 +186,21 @@ int main() {
 
 ### Complete Go Bindings
 
+Build and run the Go example:
+
+```bash
+cd examples/go
+go build
+
+# Run using the wrapper script (handles library path automatically)
+./run_example.sh -i input.ibd -o output.ibd
+
+# Or manually set the library path
+LD_LIBRARY_PATH=../../build ./ibd-reader-example -i input.ibd -o output.ibd
+```
+
+**Note**: The shared library must be accessible at runtime. Use the provided `run_example.sh` wrapper script or set `LD_LIBRARY_PATH` to the build directory.
+
 ```go
 package main
 
@@ -326,7 +341,8 @@ func main() {
 
 ```bash
 go build -o ibd_tool main.go
-./ibd_tool -i compressed.ibd -o output.ibd -debug
+# Use the wrapper script or set LD_LIBRARY_PATH
+LD_LIBRARY_PATH=./build ./ibd_tool -i compressed.ibd -o output.ibd -debug
 ```
 
 ## Python Example
