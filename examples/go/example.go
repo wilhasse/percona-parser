@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 	
-	ibd "./ibd_reader"
+	"ibd-reader-example/ibd"
 )
 
 func printSeparator() {

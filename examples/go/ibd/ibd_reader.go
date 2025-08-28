@@ -2,8 +2,8 @@
 package ibd
 
 /*
-#cgo CFLAGS: -I../../lib
-#cgo LDFLAGS: -L../../build -libd_reader -Wl,-rpath,../../build
+#cgo CFLAGS: -I../../../lib
+#cgo LDFLAGS: -L../../../build -libd_reader -Wl,-rpath,../../../build
 #include "ibd_reader_api.h"
 #include <stdlib.h>
 */
