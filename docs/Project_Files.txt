@@ -1,0 +1,242 @@
+================================================================================
+                    PERCONA PARSER PROJECT - FILE DOCUMENTATION
+================================================================================
+
+This document provides a comprehensive overview of all C/C++/H files in the 
+Percona Parser project. The project appears to be a toolkit for parsing, 
+decrypting, and decompressing InnoDB database files (.ibd files).
+
+================================================================================
+                              HEADER FILES (.h)
+================================================================================
+
+1. decompress.h
+----------------
+Purpose: Declarations for page decompression functionality
+Key Functions:
+  - decompress_page_inplace(): Decompress or copy one page in memory
+  - decompress_ibd(): Main function to read compressed .ibd files and write uncompressed
+  - determine_page_size(): Determine page size from file
+  - is_page_compressed(): Check if a page is compressed
+
+2. decrypt.h
+-------------
+Purpose: Declarations for encryption/decryption functionality
+Key Functions:
+  - get_master_key(): Retrieve master encryption key from keyring
+  - read_tablespace_key_iv(): Read tablespace-specific key and IV
+  - decrypt_page_inplace(): Decrypt a single page in memory
+  - decrypt_ibd_file(): Decrypt entire .ibd file
+
+3. ibd_enc_reader.h
+--------------------
+Purpose: Utilities for reading InnoDB encryption headers
+Key Components:
+  - Encryption version enums (V1, V2, V3)
+  - Tablespace_key_iv structure to hold decrypted keys
+  - decode_ibd_encryption_info(): Main decoding function
+  - Helper functions for reading big-endian integers
+
+4. my_keyring_lookup.h
+-----------------------
+Purpose: Helper class for fetching keys from MySQL keyring
+Key Components:
+  - MyKeyringLookup class: Wrapper around Keys_container
+  - get_innodb_master_key(): Build key name and fetch from container
+
+5. mysql_crc32c.h
+------------------
+Purpose: CRC-32C checksum implementation interface
+Key Functions:
+  - mysql_crc32c_init(): Initialize lookup tables
+  - mysql_crc32c(): Function pointer to CRC calculation
+
+6. parser.h
+------------
+Purpose: Declarations for parsing InnoDB pages and records
+Key Functions:
+  - parse_records_on_page(): Parse records from a data page
+  - discover_primary_index_id(): Find primary index ID
+  - is_primary_index(): Check if page belongs to primary index
+  - load_ib2sdi_table_columns(): Load table schema from JSON
+  - build_table_def_from_json(): Build table definition structure
+  - debug_print_table_def(): Debug output for table structure
+  - debug_print_compact_row(): Debug output for row data
+
+7. tables_dict.h
+-----------------
+Purpose: Table definition structures and constants
+Key Components:
+  - field_type_t enum: All supported field types (INT, CHAR, TEXT, etc.)
+  - field_limits_t: Constraints and validation rules for fields
+  - field_def_t: Complete field definition including name, type, length
+  - table_def_t: Complete table definition with all fields
+  - Constants for maximum fields, enum values, etc.
+
+8. undrop_for_innodb.h
+------------------------
+Purpose: Recovery functions for InnoDB records
+Key Functions:
+  - check_for_a_record(): Validate if a record is valid
+  - process_ibrec(): Process and output a valid record
+
+================================================================================
+                         IMPLEMENTATION FILES (.cc/.cpp)
+================================================================================
+
+1. decompress.cc
+-----------------
+Purpose: Implementation of page decompression logic
+Key Features:
+  - Handles both compressed and uncompressed pages
+  - Supports InnoDB compression formats
+  - Contains stubs for InnoDB logger (ib::logger, ib::warn, etc.)
+  - Implements page-by-page decompression
+  - Uses MySQL's page_zip_decompress_low() for actual decompression
+
+2. decrypt.cc
+--------------
+Purpose: Implementation of encryption/decryption functionality
+Key Features:
+  - Uses OpenSSL for cryptographic operations
+  - Implements keyring deobfuscation
+  - Handles MySQL's partial-block AES decryption
+  - Supports different encryption page types
+  - Works with AES-256-CBC encryption
+
+3. ibd_enc_reader.cc
+---------------------
+Purpose: Implementation of InnoDB encryption header parsing
+Key Features:
+  - Parses encryption magic bytes (lCA, lCB, lCC)
+  - Handles different encryption versions
+  - Uses my_aes_decrypt for AES-256-ECB decryption
+  - Validates checksums using CRC32C
+  - Provides hex dump utilities for debugging
+
+4. ib_parser.cc
+----------------
+Purpose: Main entry point combining all functionality
+Key Features:
+  - Mode 1: Decrypt only
+  - Mode 2: Decompress only  
+  - Mode 3: Parse only (for data extraction)
+  - Mode 4: Combined decrypt + decompress
+  - Handles command-line arguments for different operations
+  - Determines if tables are compressed
+  - Coordinates between different components
+
+5. keyring_stubs.cc
+---------------------
+Purpose: Stub implementations for MySQL keyring symbols
+Key Features:
+  - Provides minimal THD and Security_context classes
+  - Implements push_warning as no-op
+  - Stubs for MySQL RW-lock operations
+  - Required for linking against Percona keyring code
+
+6. my_keyring_lookup.cc
+-------------------------
+Purpose: Implementation of keyring lookup helper
+Key Features:
+  - Builds InnoDB key names (INNODBKey-<uuid>-<id>)
+  - Fetches keys from Keys_container
+  - Handles key data extraction and copying
+
+7. mysql_crc32c.cc
+-------------------
+Purpose: Software implementation of CRC-32C
+Key Features:
+  - Uses Castagnoli polynomial (0x1EDC6F41)
+  - Implements slice-by-8 algorithm for performance
+  - Builds lookup tables on initialization
+  - Handles both big-endian and little-endian systems
+
+8. parser.cc
+-------------
+Purpose: Implementation of InnoDB page and record parsing
+Key Features:
+  - Discovers primary index by scanning pages
+  - Parses JSON table definitions from ib2sdi output
+  - Iterates through records on leaf pages
+  - Provides debug printing for table structures
+  - Handles both COMPACT and REDUNDANT row formats
+
+9. tables_dict.cc
+------------------
+Purpose: Table definition initialization and management
+Key Features:
+  - Initializes table definitions with field counts
+  - Calculates nullable fields
+  - Computes minimum and maximum record sizes
+  - Handles record header size calculations
+
+10. undrop_for_innodb.cc
+--------------------------
+Purpose: Record recovery and validation implementation
+Key Features:
+  - Custom offset management (avoiding MySQL's rec_get_nth_field)
+  - Field size validation
+  - NULL handling
+  - Pipe-separated output format
+  - Support for COMPACT row format
+  - Field extraction from InnoDB pages
+
+================================================================================
+                           PROJECT ARCHITECTURE
+================================================================================
+
+The project is structured as a modular toolkit with the following components:
+
+1. CORE FUNCTIONALITY:
+   - Decryption: Handles encrypted InnoDB files using MySQL keyring
+   - Decompression: Handles compressed InnoDB pages
+   - Parsing: Extracts and interprets data from InnoDB pages
+
+2. MAIN WORKFLOWS:
+   - Decrypt → Output decrypted file
+   - Decompress → Output uncompressed file
+   - Parse → Extract and display row data
+   - Combined → Decrypt + Decompress in single pass
+
+3. KEY DEPENDENCIES:
+   - MySQL/Percona Server headers for InnoDB structures
+   - OpenSSL for cryptography
+   - RapidJSON for parsing table definitions
+   - MySQL keyring plugin for key management
+
+4. USAGE MODES:
+   Mode 1: Decrypt encrypted .ibd files
+   Mode 2: Decompress compressed .ibd files
+   Mode 3: Parse and extract data from .ibd files
+   Mode 4: Combined decrypt and decompress operation
+
+================================================================================
+                              TYPICAL USAGE
+================================================================================
+
+The main executable is 'ib_parser' which accepts different modes:
+
+1. Decrypt only:
+   ib_parser 1 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>
+
+2. Decompress only:
+   ib_parser 2 <in_file.ibd> <out_file>
+
+3. Parse only:
+   ib_parser 3 <in_file.ibd> <table_def.json>
+
+4. Decrypt + Decompress:
+   ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>
+
+================================================================================
+                                  NOTES
+================================================================================
+
+- The project appears to be designed for data recovery and forensic analysis
+- It can handle both encrypted and compressed InnoDB files
+- The parser can extract data even from corrupted files
+- Table definitions can be loaded from JSON (ib2sdi format)
+- Supports MySQL 5.6+ InnoDB file formats
+
+================================================================================
