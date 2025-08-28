@@ -3,47 +3,44 @@
 cmake_minimum_required(VERSION 3.10)
 project(MyIbParser LANGUAGES CXX)
 
+# Set paths to percona-server
+set(MYSQL_SOURCE_DIR "/home/cslog/percona-server" CACHE PATH "Path to percona-server source")
+set(MYSQL_BUILD_DIR "/home/cslog/percona-server/build" CACHE PATH "Path to percona-server build")
+
 # Example: C++17
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-Wno-cast-qual -Wall -Wextra -Wno-unused-parameter)
 
-# If you have a "GenError" or "COMPONENT Server" reference from MySQL macros,
-# you can adapt them or remove them if you're not actually using them.
-# We'll do a straightforward "add_executable" example.
-
-# -- Provide a list of source files for decryption logic (excluding the old main)
+# -- Provide a list of source files for decryption logic
 set(DECRYPT_LIB_SOURCES
-  decrypt.cc        # <--- This file has e.g. decrypt_page_inplace(), get_master_key(), etc.
+  decrypt.cc
   ibd_enc_reader.cc
   my_keyring_lookup.cc
   mysql_crc32c.cc
   keyring_stubs.cc
-
-  # plus all your plugin/keyring .cc if needed
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/buffered_file_io.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keyring_key.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keyring_impl.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keys_container.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/digest.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/converter.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/file_io.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/buffer.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker_factory.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker_ver_1_0.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker_ver_2_0.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keys_iterator.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/i_keys_container.h
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/hash_to_buffer_serializer.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/i_keyring_key.h
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/i_serializer.h
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/logger.h
-  ${CMAKE_SOURCE_DIR}/strings/ctype-latin1.cc
+  
+  # Plugin/keyring sources from percona-server
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/buffered_file_io.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keyring_key.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keyring_impl.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keys_container.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/digest.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/converter.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/file_io.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/buffer.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker_factory.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker_ver_1_0.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker_ver_2_0.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keys_iterator.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/hash_to_buffer_serializer.cc
+  ${MYSQL_SOURCE_DIR}/strings/ctype-latin1.cc
 )
 
-# -- Provide a list of source files for decompress logic (excluding the old main)
+# -- Provide a list of source files for decompress logic
 set(DECOMPRESS_LIB_SOURCES
-  decompress.cc     # <--- This has decompress_page_inplace(), decompress_ibd(), etc.
+  decompress.cc
 )
 
 # -- The main entry point: "ib_parser.cc"
@@ -54,18 +51,14 @@ set(IB_PARSER_MAIN
   undrop_for_innodb.cc
 )
 
-# Combine them all for building a single binary "ib_parser"
-MYSQL_ADD_EXECUTABLE(ib_parser
+# Create the executable
+add_executable(ib_parser
   ${IB_PARSER_MAIN}
   ${DECRYPT_LIB_SOURCES}
   ${DECOMPRESS_LIB_SOURCES}
-  COMPONENT Server
-  DEPENDENCIES GenError
-  LINK_LIBRARIES mysys innodb_zipdecompress ext::lz4
 )
 
 # Add RapidJSON include path
-# Adjust the path below to point to your downloaded rapidjson include directory
 set(RAPIDJSON_INCLUDE_DIR "/home/cslog/rapidjson/include")
 
 # Verify that the path exists
@@ -73,53 +66,82 @@ if(NOT EXISTS "${RAPIDJSON_INCLUDE_DIR}")
     message(FATAL_ERROR "RapidJSON include directory not found: ${RAPIDJSON_INCLUDE_DIR}")
 endif()
 
-# Example: include directories
+# Include directories
 target_include_directories(ib_parser
   PRIVATE
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/storage/innobase/include
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${MYSQL_SOURCE_DIR}
+    ${MYSQL_SOURCE_DIR}/storage/innobase
+    ${MYSQL_SOURCE_DIR}/storage/innobase/include
+    ${MYSQL_SOURCE_DIR}/include
+    ${MYSQL_SOURCE_DIR}/sql
+    ${MYSQL_SOURCE_DIR}/plugin/keyring
+    ${MYSQL_SOURCE_DIR}/plugin/keyring/common
+    ${MYSQL_BUILD_DIR}/include
     ${RAPIDJSON_INCLUDE_DIR}
 )
 
-# If you need compile definitions
+# Link directories
+link_directories(
+    ${MYSQL_BUILD_DIR}/archive_output_directory
+    ${MYSQL_BUILD_DIR}/storage/innobase
+    ${MYSQL_BUILD_DIR}/mysys
+    ${MYSQL_BUILD_DIR}/strings
+    ${MYSQL_BUILD_DIR}/extra/lz4/lz4_lib
+)
+
+# Compile definitions
 target_compile_definitions(ib_parser
   PRIVATE
     UNIV_NO_ERR_MSGS
     UNIV_LIBRARY
     DISABLE_PSI_MEMORY
+    MYSQL_SERVER
+    ER_TOO_MANY_ERROR_CODES=9999
+    ER_TOO_BIG_ERROR_CODE=9998
+    DBUG_OFF
+    NDEBUG
+    DISABLE_PSI_FILE
+    DISABLE_PSI_RWLOCK
+    DISABLE_PSI_MUTEX
+    DISABLE_PSI_THREAD
 )
 
-# If you want to disable warnings:
-set_source_files_properties(
-  ${IB_PARSER_MAIN}
-  ${DECRYPT_LIB_SOURCES}
-  ${DECOMPRESS_LIB_SOURCES}
-  PROPERTIES
-    COMPILE_FLAGS "-Wno-unused-parameter"
+# Link libraries
+target_link_libraries(ib_parser
+  PRIVATE
+    ${MYSQL_BUILD_DIR}/archive_output_directory/libmysys.a
+    ${MYSQL_BUILD_DIR}/storage/innobase/libinnodb_zipdecompress.a
+    ${MYSQL_BUILD_DIR}/archive_output_directory/liblz4_lib.a
+    ${MYSQL_BUILD_DIR}/archive_output_directory/libstrings.a
+    ${MYSQL_BUILD_DIR}/archive_output_directory/libperconaserverclient.a
+    z
+    ssl
+    crypto
+    pthread
+    dl
 )
 
-# This must be separate flags, typically with escaped parentheses:
+# Set source file properties to disable certain warnings and define macros
 set_source_files_properties(
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/buffered_file_io.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keyring_key.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keyring_impl.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keys_container.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/file_io.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/buffer.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker_factory.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker_ver_1_0.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/checker/checker_ver_2_0.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/common/keys_iterator.cc
-  ${CMAKE_SOURCE_DIR}/plugin/keyring/hash_to_buffer_serializer.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/buffered_file_io.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keyring_key.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keyring_impl.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keys_container.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/file_io.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/buffer.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker_factory.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker_ver_1_0.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/checker/checker_ver_2_0.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/common/keys_iterator.cc
+  ${MYSQL_SOURCE_DIR}/plugin/keyring/hash_to_buffer_serializer.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/ib_parser.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/ibd_enc_reader.cc
-  ${CMAKE_CURRENT_SOURCE_DIR}/ibd_enc_reader.h
   ${CMAKE_CURRENT_SOURCE_DIR}/my_keyring_lookup.cc
   PROPERTIES
     COMPILE_FLAGS
-      "-DLogPluginErr\\(level,errcode,message\\)=do{}while\\(0\\) -DLogPluginErrV\\(level,errcode,vl\\)=do{}while\\(0\\)"
+      "-DLogPluginErr\\(level,errcode,message\\)=do{}while\\(0\\) -DLogPluginErrV\\(level,errcode,vl\\)=do{}while\\(0\\) -Wno-unused-parameter"
 )
 
 # Done. "make" => builds "ib_parser".

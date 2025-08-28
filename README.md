@@ -1,4 +1,90 @@
-The project builds a standalone tool named **`ib_parser`**. `CMakeLists.txt` defines the build using a C++17 toolchain and combines sources for decryption, decompression and parsing. Key pieces of that configuration are the lists of decrypt-related sources and decompress-related sources, plus the main executable definition, as seen in lines establishing the variable lists and the final `MYSQL_ADD_EXECUTABLE` call
+# Percona InnoDB Parser
+
+A standalone tool for parsing, decrypting, and decompressing InnoDB files from Percona Server.
+
+## Build Requirements
+
+This project requires a built Percona Server source tree alongside it. The directory structure should be:
+```
+parent_directory/
+├── percona-server/       # Percona Server source code (built)
+│   ├── build/           # Build output directory with libraries
+│   └── ...
+└── percona-parser/      # This project
+    └── ...
+```
+
+## Building the Project
+
+### Prerequisites
+
+1. **Build Percona Server first:**
+   ```bash
+   cd percona-server
+   mkdir build && cd build
+   cmake .. -DWITH_BOOST=/path/to/boost -DDOWNLOAD_BOOST=1 -DWITH_BOOST_VERSION=1.77.0
+   make -j$(nproc)
+   ```
+
+2. **Install RapidJSON:**
+   ```bash
+   cd ~
+   git clone https://github.com/Tencent/rapidjson.git
+   ```
+
+### Building percona-parser
+
+1. **Clone and enter the project:**
+   ```bash
+   cd percona-parser
+   ```
+
+2. **Create build directory and configure:**
+   ```bash
+   mkdir build && cd build
+   cmake ..
+   ```
+
+   The CMakeLists.txt automatically detects:
+   - Percona Server source at `../percona-server`
+   - Percona Server build at `../percona-server/build`
+   - RapidJSON at `~/rapidjson/include`
+
+3. **Build the executable:**
+   ```bash
+   make -j4
+   ```
+
+   This will create the `ib_parser` executable in the build directory.
+
+### Troubleshooting Build Issues
+
+If you encounter compilation errors:
+- Ensure Percona Server is fully built before attempting to build this project
+- Check that all required libraries are present in `percona-server/build/archive_output_directory/`
+- Verify RapidJSON is installed in the expected location
+
+## Usage
+
+After building, the `ib_parser` executable supports four modes:
+
+```bash
+# Mode 1: Decrypt only
+./ib_parser 1 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>
+
+# Mode 2: Decompress only  
+./ib_parser 2 <compressed.ibd> <decompressed.ibd>
+
+# Mode 3: Parse only (requires table definition JSON)
+./ib_parser 3 <input.ibd> <table_def.json>
+
+# Mode 4: Decrypt then Decompress in a single pass
+./ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <encrypted.ibd> <output.ibd>
+```
+
+## Project Overview
+
+The project builds a standalone tool named **`ib_parser`** that combines sources for decryption, decompression and parsing
 
 ### Decompression
 
