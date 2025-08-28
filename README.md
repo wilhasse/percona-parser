@@ -50,12 +50,37 @@ parent_directory/
    - Percona Server build at `../percona-server/build`
    - RapidJSON at `~/rapidjson/include`
 
-3. **Build the executable:**
+3. **Build options:**
+   
+   Build everything (default):
    ```bash
    make -j4
    ```
+   
+   Build only the executable:
+   ```bash
+   cmake .. -DBUILD_SHARED_LIB=OFF -DBUILD_STATIC_LIB=OFF
+   make ib_parser
+   ```
+   
+   Build only the shared library:
+   ```bash
+   cmake .. -DBUILD_EXECUTABLE=OFF
+   make
+   ```
+   
+   Build static library:
+   ```bash
+   cmake .. -DBUILD_STATIC_LIB=ON
+   make
+   ```
 
-   This will create the `ib_parser` executable in the build directory.
+### Build Outputs
+
+After successful build, you'll have:
+- `ib_parser` - Command-line executable (7.9MB)
+- `libibd_reader.so` - Shared library for C/C++/Go integration (8MB)
+- `libibd_reader.a` - Static library (if built)
 
 ### Troubleshooting Build Issues
 
@@ -64,7 +89,47 @@ If you encounter compilation errors:
 - Check that all required libraries are present in `percona-server/build/archive_output_directory/`
 - Verify RapidJSON is installed in the expected location
 
-## Usage
+## Library Usage (Quick Start)
+
+The project provides a C library (`libibd_reader.so`) for integrating InnoDB file operations into your applications.
+
+### Basic Usage
+
+```c
+#include "ibd_reader_api.h"
+
+// Initialize and create reader
+ibd_init();
+ibd_reader_t reader = ibd_reader_create();
+
+// Decompress a file
+ibd_decompress_file(reader, "compressed.ibd", "output.ibd");
+
+// Decrypt a file
+ibd_decrypt_file(reader, "encrypted.ibd", "decrypted.ibd", 
+                "/path/to/keyring", 1, "server-uuid");
+
+// Cleanup
+ibd_reader_destroy(reader);
+ibd_cleanup();
+```
+
+### Language Bindings
+- **C/C++**: Native API (see [docs/Api_reference.md](docs/Api_reference.md))
+- **Go**: CGO bindings in `examples/go/`
+- **Python**: ctypes example in [docs/Examples.md](docs/Examples.md#python-example)
+
+### Documentation
+- **[Library Usage Guide](docs/Library_usage.md)** - Detailed usage instructions
+- **[API Reference](docs/Api_reference.md)** - Complete API documentation
+- **[Building Guide](docs/Building.md)** - Build from source instructions
+- **[Examples](docs/Examples.md)** - Complete code examples
+
+### Quick Example Files
+- `examples/c/example.c` - C demonstration
+- `examples/go/example.go` - Go demonstration
+
+## Command-Line Usage
 
 After building, the `ib_parser` executable supports four modes:
 
