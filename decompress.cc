@@ -210,6 +210,8 @@ bool is_page_compressed(const unsigned char* page_data,
 {
   // If physical < logical => likely compressed
   if (physical_size < logical_size) {
+    fprintf(stderr, "  [DEBUG] Page detected as compressed (physical=%zu < logical=%zu)\n",
+            physical_size, logical_size);
     return true;
   }
 
@@ -218,6 +220,7 @@ bool is_page_compressed(const unsigned char* page_data,
   static const uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 16;
   uint16_t page_type = mach_read_from_2(page_data + FIL_PAGE_TYPE);
   if (page_type == FIL_PAGE_COMPRESSED || page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+    fprintf(stderr, "  [DEBUG] Page detected as compressed (page_type=%u)\n", page_type);
     return true;
   }
 
@@ -245,6 +248,8 @@ bool decompress_page_inplace(
 
     // If compressed, check page_type
     uint16_t page_type = mach_read_from_2(src_buf + FIL_PAGE_TYPE);
+    fprintf(stderr, "  [DEBUG] Attempting to decompress page (type=%u, phys=%zu, logical=%zu)\n",
+            page_type, physical_size, logical_size);
 
     // We'll allocate a temporary buffer for the decompressed data
     unsigned char* temp = (unsigned char*)ut::malloc(2 * logical_size);
@@ -264,20 +269,49 @@ bool decompress_page_inplace(
 
     // Only attempt to decompress if it's a real index page
     if (page_type == FIL_PAGE_INDEX) {
+        fprintf(stderr, "  [DEBUG] Decompressing INDEX page with page_zip_decompress_low\n");
         success = page_zip_decompress_low(&page_zip, aligned_temp, true);
         if (!success) {
-            fprintf(stderr, "Failed to decompress index page.\n");
+            fprintf(stderr, "  [ERROR] Failed to decompress index page.\n");
         } else {
+            fprintf(stderr, "  [DEBUG] Successfully decompressed index page\n");
             memcpy(out_buf, aligned_temp, logical_size);
         }
     } else {
         // Not an index page => just copy the raw page data
+        fprintf(stderr, "  [DEBUG] Page type %u is not FIL_PAGE_INDEX, copying raw data\n", page_type);
         memcpy(out_buf, src_buf, physical_size);
         success = true;
     }
 
     ut::free(temp);
     return success;
+}
+
+// ----------------------------------------------------------------
+// Helper to get page type name for debugging
+// ----------------------------------------------------------------
+static const char* get_page_type_name(uint16_t page_type) {
+    switch(page_type) {
+        case 0: return "FIL_PAGE_TYPE_ALLOCATED";
+        case 2: return "FIL_PAGE_UNDO_LOG";
+        case 3: return "FIL_PAGE_INODE";
+        case 4: return "FIL_PAGE_IBUF_FREE_LIST";
+        case 5: return "FIL_PAGE_IBUF_BITMAP";
+        case 6: return "FIL_PAGE_TYPE_SYS";
+        case 7: return "FIL_PAGE_TYPE_TRX_SYS";
+        case 8: return "FIL_PAGE_TYPE_FSP_HDR";
+        case 9: return "FIL_PAGE_TYPE_XDES";
+        case 10: return "FIL_PAGE_TYPE_BLOB";
+        case 11: return "FIL_PAGE_TYPE_ZBLOB";
+        case 12: return "FIL_PAGE_TYPE_ZBLOB2";
+        case 14: return "FIL_PAGE_COMPRESSED";
+        case 15: return "FIL_PAGE_ENCRYPTED";
+        case 16: return "FIL_PAGE_COMPRESSED_AND_ENCRYPTED";
+        case 17: return "FIL_PAGE_ENCRYPTED_RTREE";
+        case 17855: return "FIL_PAGE_INDEX";
+        default: return "UNKNOWN";
+    }
 }
 
 // ----------------------------------------------------------------
@@ -293,6 +327,9 @@ static bool fetch_page(
 {
     size_t psize      = page_sz.physical();   // e.g. 8 KB
     size_t logical_sz = page_sz.logical();    // e.g. 16 KB
+
+    fprintf(stderr, "[Page %u] Reading page (physical size=%zu, logical size=%zu)\n", 
+            page_no, psize, logical_sz);
 
     // Allocate a buffer for the raw on-disk page (psize bytes).
     unsigned char* disk_buf = (unsigned char*)malloc(psize);
@@ -313,8 +350,15 @@ static bool fetch_page(
         return false;
     }
 
+    // Get page type for debug info
+    uint16_t page_type = mach_read_from_2(disk_buf + FIL_PAGE_TYPE);
+    fprintf(stderr, "[Page %u] Page type: %u (%s)\n", 
+            page_no, page_type, get_page_type_name(page_type));
+
     // CHANGED: call is_page_compressed() instead of page_sz.is_compressed().
     bool compressed = is_page_compressed(disk_buf, psize, logical_sz);
+    fprintf(stderr, "[Page %u] Compression detected: %s\n", 
+            page_no, compressed ? "YES" : "NO");
 
     // decompress or copy
     bool ok = decompress_page_inplace(
@@ -324,6 +368,12 @@ static bool fetch_page(
                   uncompressed_buf,
                   uncompressed_buf_len,
                   logical_sz);
+
+    if (ok) {
+        fprintf(stderr, "[Page %u] Processing completed successfully\n", page_no);
+    } else {
+        fprintf(stderr, "[Page %u] Processing failed!\n", page_no);
+    }
 
     free(disk_buf);
     return ok;
@@ -352,37 +402,86 @@ bool decompress_ibd(File in_fd, File out_fd)
 
   // 3) Calculate number of pages
   uint64_t page_physical = static_cast<uint64_t>(pg_sz.physical());
+  uint64_t page_logical = static_cast<uint64_t>(pg_sz.logical());
   uint64_t num_pages = total_bytes / page_physical;
-  fprintf(stderr, "Found %llu pages (each %llu bytes) in input.\n",
-          (unsigned long long)num_pages,
-          (unsigned long long)page_physical);
+  
+  fprintf(stderr, "\n========================================\n");
+  fprintf(stderr, "DECOMPRESSION STARTING\n");
+  fprintf(stderr, "========================================\n");
+  fprintf(stderr, "Input file size: %llu bytes\n", (unsigned long long)total_bytes);
+  fprintf(stderr, "Page size - Physical: %llu bytes, Logical: %llu bytes\n",
+          (unsigned long long)page_physical,
+          (unsigned long long)page_logical);
+  fprintf(stderr, "Total pages to process: %llu\n", (unsigned long long)num_pages);
+  fprintf(stderr, "Compression ratio: %.2f:1 (if compressed)\n", 
+          page_physical != page_logical ? (double)page_logical/page_physical : 1.0);
+  fprintf(stderr, "========================================\n\n");
 
   // 4) For each page, fetch + decompress, then write out
   size_t buf_size = std::max(pg_sz.physical(), pg_sz.logical());
   unsigned char* page_buf = (unsigned char*)malloc(buf_size);
   if (!page_buf) {
     fprintf(stderr, "malloc of %llu bytes for page_buf failed.\n",
-            (unsigned long long)page_physical);
+            (unsigned long long)buf_size);
     return false;
   }
 
+  // Statistics counters
+  uint64_t pages_processed = 0;
+  uint64_t pages_compressed = 0;
+  uint64_t pages_failed = 0;
+  uint64_t pages_written = 0;
+
   for (uint64_t i = 0; i < num_pages; i++) {
      if (!fetch_page(in_fd, (page_no_t)i, pg_sz, page_buf, buf_size)) {
-      fprintf(stderr, "Error reading/decompressing page %llu.\n",
+      fprintf(stderr, "[ERROR] Failed to process page %llu.\n",
               (unsigned long long)i);
+      pages_failed++;
       //free(page_buf);
       //return false;      
     } else {
+      pages_processed++;
+      
+      // Check if this page was compressed (for statistics)
+      if (pg_sz.physical() < pg_sz.logical()) {
+        pages_compressed++;
+      }
+      
       // Write out the (uncompressed) page
       size_t w = my_write(out_fd, (uchar*)page_buf, pg_sz.logical(), MYF(0));
-      if (w != UNIV_PAGE_SIZE_ORIG) {
-        fprintf(stderr, "my_write failed on page %llu.\n", (unsigned long long)i);
+      if (w != pg_sz.logical()) {
+        fprintf(stderr, "[ERROR] Write failed on page %llu (wrote %zu of %llu bytes).\n", 
+                (unsigned long long)i, w, (unsigned long long)pg_sz.logical());
         free(page_buf);
         return false;
       }
+      pages_written++;
+    }
+    
+    // Progress indicator every 100 pages
+    if ((i + 1) % 100 == 0 || (i + 1) == num_pages) {
+      fprintf(stderr, "[PROGRESS] Processed %llu/%llu pages (%.1f%%)\n",
+              (unsigned long long)(i + 1),
+              (unsigned long long)num_pages,
+              100.0 * (i + 1) / num_pages);
     }
   }
 
+  // Final summary
+  fprintf(stderr, "\n========================================\n");
+  fprintf(stderr, "DECOMPRESSION COMPLETE\n");
+  fprintf(stderr, "========================================\n");
+  fprintf(stderr, "Total pages: %llu\n", (unsigned long long)num_pages);
+  fprintf(stderr, "Successfully processed: %llu\n", (unsigned long long)pages_processed);
+  fprintf(stderr, "Pages written: %llu\n", (unsigned long long)pages_written);
+  fprintf(stderr, "Failed pages: %llu\n", (unsigned long long)pages_failed);
+  if (page_physical < page_logical) {
+    fprintf(stderr, "Compressed pages found: %llu\n", (unsigned long long)pages_compressed);
+  }
+  fprintf(stderr, "Output file size: %llu bytes\n", 
+          (unsigned long long)(pages_written * pg_sz.logical()));
+  fprintf(stderr, "========================================\n\n");
+
   free(page_buf);
-  return true;
+  return pages_failed == 0;
 }
