@@ -459,11 +459,11 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
  * load_ib2sdi_table_columns():
  *   Parses an ib2sdi-generated JSON file (like the one you pasted),
  *   searches for the array element that has "dd_object_type" == "Table",
- *   then extracts its "columns" array from "dd_object".
+ *   then extracts its "columns" array from "dd_object" and the table name.
  *
  * Returns 0 on success, non-0 on error.
  */
-int load_ib2sdi_table_columns(const char* json_path)
+int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
 {
     // 1) Open the file
     std::ifstream ifs(json_path);
@@ -526,6 +526,15 @@ int load_ib2sdi_table_columns(const char* json_path)
         return 1;
     }
     const rapidjson::Value& dd_obj = (*table_obj)["dd_object"];
+
+    // Extract table name from dd_object
+    if (dd_obj.HasMember("name") && dd_obj["name"].IsString()) {
+        table_name = dd_obj["name"].GetString();
+        std::cout << "[Debug] Extracted table name: " << table_name << "\n";
+    } else {
+        std::cerr << "[Warning] 'dd_object' is missing 'name'. Using default 'UNKNOWN_TABLE'.\n";
+        table_name = "UNKNOWN_TABLE";
+    }
 
     if (!dd_obj.HasMember("columns") || !dd_obj["columns"].IsArray()) {
         std::cerr << "[Error] 'dd_object' is missing 'columns' array.\n";

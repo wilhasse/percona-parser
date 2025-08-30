@@ -3,6 +3,7 @@
 // ---------------
 #include <cstdint>
 #include <cstddef>
+#include <string>
 #include "page0page.h"
 #include "tables_dict.h"
 
@@ -14,7 +15,7 @@ int discover_primary_index_id(int fd);
 
 bool is_primary_index(const unsigned char* page);
 
-int load_ib2sdi_table_columns(const char* json_path);
+int load_ib2sdi_table_columns(const char* json_path, std::string& table_name);
 
 int build_table_def_from_json(table_def_t* table, const char* tbl_name);
 

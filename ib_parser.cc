@@ -209,20 +209,25 @@ static int do_decompress_main(int argc, char** argv)
  */
 static int do_parse_main(int argc, char** argv)
 {
-  if (argc < 2) {
+  if (argc < 3) {
     std::cerr << "Usage for mode=3 (parse-only):\n"
               << "  ib_parser 3 <in_file.ibd> <table_def.json>\n";
     return 1;
   }
 
   const char* in_file = argv[1];
+  const char* json_file = argv[2];
 
-  // 0) Load table definition
-  load_ib2sdi_table_columns(argv[2]);
+  // 0) Load table definition and extract table name
+  std::string table_name;
+  if (load_ib2sdi_table_columns(json_file, table_name) != 0) {
+    std::cerr << "Failed to load table columns from JSON.\n";
+    return 1;
+  }
 
   // Build a table_def_t from g_columns
   static table_def_t my_table;
-  if (build_table_def_from_json(&my_table, "TESTE") != 0) {
+  if (build_table_def_from_json(&my_table, table_name.c_str()) != 0) {
     std::cerr << "Failed to build table_def_t from JSON.\n";
     return 1;
   }
