@@ -1,7 +1,22 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(gdb:*)",
+      "Bash(make:*)",
+      "Bash(./build/ib_parser:*)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "Bash(./tests/test_compressed.sh:*)",
+      "Bash(mysql:*)",
+      "Read(/var/lib/mysql/**)",
+      "Bash(sudo:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git reset:*)",
+      "Bash(./tools/ibd_text_inspector.sh:*)",
+      "Bash(./demo_encryption.sh:*)",
+      "Bash(git rm:*)"
     ],
     "deny": []
   }
