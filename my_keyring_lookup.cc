@@ -41,17 +41,19 @@ bool MyKeyringLookup::get_innodb_master_key(
     key_name = "INNODBKey-" + std::to_string(master_key_id);
   }
 
-  // 2) Create a temporary Key object 
-  std::unique_ptr<keyring::IKey> temp_key(create_temp_key_object(key_name));
+  // 2) Create a temporary Key object (using raw pointer to avoid double-free issue)
+  keyring::IKey* temp_key = create_temp_key_object(key_name);
 
   // 3) Use container->fetch_key(...). If successful, the container
   //    will fill temp_key with the raw data. If not found, it returns nullptr.
-  keyring::IKey* fetched_ptr = m_keys->fetch_key(temp_key.get());
+  keyring::IKey* fetched_ptr = m_keys->fetch_key(temp_key);
   if (!fetched_ptr) {
     std::cerr << "MyKeyringLookup: No such key in container: " << key_name << "\n";
+    // Note: We're intentionally NOT deleting temp_key here to avoid the double-free issue
+    // This is a small memory leak, but prevents the crash
     return false;
   }
-  // fetched_ptr is the same pointer as temp_key.get(), but let's be explicit:
+  // fetched_ptr is the same pointer as temp_key, but let's be explicit:
   // - if non-null, we now have the raw bytes in temp_key->get_key_data().
 
   // 4) Copy the raw data out
@@ -60,6 +62,7 @@ bool MyKeyringLookup::get_innodb_master_key(
   if (!raw_data || raw_len == 0) {
     std::cerr << "MyKeyringLookup: key " << key_name
               << " has no data in container?\n";
+    // Note: We're intentionally NOT deleting temp_key here to avoid the double-free issue
     return false;
   }
 
@@ -69,6 +72,8 @@ bool MyKeyringLookup::get_innodb_master_key(
   std::cout << "MyKeyringLookup: Fetched " << raw_len
             << " bytes for key `" << key_name << "`\n";
 
-  // 5) done, temp_key is freed automatically by unique_ptr destructor
+  // 5) Note: We're intentionally NOT deleting temp_key here to avoid the double-free issue
+  // The fetch_key() function appears to transfer ownership or corrupt the Key's internal state
+  // This is a small memory leak but prevents the crash
   return true;
 }

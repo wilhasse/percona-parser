@@ -278,9 +278,14 @@ bool decompress_page_inplace(
             memcpy(out_buf, aligned_temp, logical_size);
         }
     } else {
-        // Not an index page => just copy the raw page data
-        fprintf(stderr, "  [DEBUG] Page type %u is not FIL_PAGE_INDEX, copying raw data\n", page_type);
+        // Not an index page => copy the compressed data and expand to logical size
+        fprintf(stderr, "  [DEBUG] Page type %u is not FIL_PAGE_INDEX, expanding to logical size\n", page_type);
+        // Copy the compressed data (which includes headers and metadata)
         memcpy(out_buf, src_buf, physical_size);
+        // If physical size is less than logical size, pad with zeros
+        if (physical_size < logical_size) {
+            memset(out_buf + physical_size, 0, logical_size - physical_size);
+        }
         success = true;
     }
 
