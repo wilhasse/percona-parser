@@ -24,6 +24,7 @@
 
 #include "tables_dict.h"
 #include "undrop_for_innodb.h"
+#include "decompress.h"
 
 /** A minimal column-definition struct */
 struct MyColumnDef {
@@ -270,29 +271,6 @@ void debug_print_compact_row(const page_t* page,
  *
  *   Returns 0 if success, non-0 if error.
  */
---- a/parser.cc
-+++ b/parser.cc
-@@ int discover_primary_index_id(int fd)
--  static const size_t kPageSize = 16384;
--  struct stat stat_buf;
--  if (fstat(fd, &stat_buf) == -1) { perror("fstat"); return 1; }
--  int block_num = stat_buf.st_size / kPageSize;
--  if (block_num == 0) { fprintf(stderr, "Empty file?\n"); return 1; }
--  unsigned char page_buf[kPageSize];
--  if (pread(fd, page_buf, kPageSize, 0) != (ssize_t)kPageSize) { perror("pread page0"); return 1; }
-@@
--    if (pread(fd, page_buf, kPageSize, offset) != (ssize_t)kPageSize) {
-+    if (pread(fd, page_buf.data(), kPageSize, offset) != (ssize_t)kPageSize) {
-       break;
-     }
--    if (fil_page_get_type(page_buf) == FIL_PAGE_INDEX) {
-+    if (fil_page_get_type(page_buf.data()) == FIL_PAGE_INDEX) {
-       bool is_root = btr_root_fseg_validate(page_buf + FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF, space_id)
-                   && btr_root_fseg_validate(page_buf + FIL_PAGE_DATA + PAGE_BTR_SEG_TOP, space_id);
-       if (is_root) {
--        uint64_t idx_id_64 = read_uint64_from_page(page_buf + PAGE_HEADER + PAGE_INDEX_ID);
-+        uint64_t idx_id_64 = read_uint64_from_page(page_buf.data() + PAGE_HEADER + PAGE_INDEX_ID);
-
 
 int discover_primary_index_id(int fd)
 {
@@ -309,12 +287,11 @@ int discover_primary_index_id(int fd)
   const off_t block_num = total / (off_t)kPageSize;
   if (block_num <= 0) { fprintf(stderr, "Empty file?\n"); return 1; }
   std::vector<unsigned char> page_buf(kPageSize);
-  if (pread(fd, page_buf.data(), kPageSize, 0) != (ssize_t)kPageSize) { perror("pread page0"); return 1; }
-
+  if (pread(fd, page_buf.data(), kPageSize, 0) != (ssize_t)kPageSize) {
     perror("pread page0");
     return 1;
   }
-  uint32_t space_id = mach_read_from_4(page_buf + FSP_HEADER_OFFSET + FSP_SPACE_ID);
+  uint32_t space_id = mach_read_from_4(page_buf.data() + FSP_HEADER_OFFSET + FSP_SPACE_ID);
 
   // 4) loop over each page
   for (int i = 0; i < block_num; i++) {
@@ -328,8 +305,8 @@ int discover_primary_index_id(int fd)
     if (fil_page_get_type(page_buf.data()) == FIL_PAGE_INDEX) {
       // Check if this is a *root* page (like ShowIndexSummary does)
       // by verifying the fseg headers for leaf and top
-      bool is_root = btr_root_fseg_validate(page_buf + FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF, space_id)
-                  && btr_root_fseg_validate(page_buf + FIL_PAGE_DATA + PAGE_BTR_SEG_TOP, space_id);
+      bool is_root = btr_root_fseg_validate(page_buf.data() + FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF, space_id)
+                  && btr_root_fseg_validate(page_buf.data() + FIL_PAGE_DATA + PAGE_BTR_SEG_TOP, space_id);
 
       if (is_root) {
         // We consider the *first* root we find as the "Primary index"

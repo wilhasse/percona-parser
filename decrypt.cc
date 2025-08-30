@@ -28,10 +28,14 @@
 #include "page0size.h"  // Add this for page_size_t
 #include "page0types.h"
 #include "fil0fil.h"
+#include "mach0data.h"  // For mach_read_from_1, mach_read_from_2
 
 // Custom
 #include "decrypt.h"
 #include "ibd_enc_reader.h" // for decode_ibd_encryption_info()
+
+// Note: Compression struct is already defined in os/file.h which is included
+// via fil0fil.h, so we can use it directly
 
 // Decrypts an obfuscated key using MySQL's keyring XOR method
 void keyring_deobfuscate(unsigned char* key_data, size_t key_len) {
@@ -205,9 +209,9 @@ bool decrypt_page_inplace(
 
     // If it's compressed+encrypted, we might need to read the compression header
     if (page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
-        // We'll use your "Compression::deserialize_header"
+        // Use Compression::deserialize_header to read compression metadata
         Compression::meta_t header;
-        Compression::deserialize_header(page_data, &header);
+        Compression::deserialize_header(reinterpret_cast<const byte*>(page_data), &header);
 
         uint16_t z_len = header.m_compressed_size;
 
