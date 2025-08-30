@@ -61,7 +61,7 @@ EOF
     
     # Decrypt the file
     echo -e "${YELLOW}Decrypting with ib_parser...${NC}"
-    ./build/ib_parser 1 1 "$SERVER_UUID" keyring_test encrypted_test.ibd decrypted_test.ibd 2>&1 | grep -E "(Successfully|master_key =)" || true
+    ../build/ib_parser 1 1 "$SERVER_UUID" keyring_test encrypted_test.ibd decrypted_test.ibd 2>&1 | grep -E "(Successfully|master_key =)" || true
 fi
 
 echo ""
