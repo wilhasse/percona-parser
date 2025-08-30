@@ -29,12 +29,17 @@ void init_table_defs(int comp) {
 		table->data_min_size = 0;
 		table->data_max_size = 0;
 		
-		for(j = 0; j < MAX_TABLE_FIELDS; j++) {
-	        printf("Counting field: %s\n", table->fields[j].name);
-			if (table->fields[j].type == FT_NONE) {
-				table->fields_count = j;
-				break;
-			}
+        // If fields_count is already set (from builder), honor it.
+        if (table->fields_count <= 0 || table->fields_count > MAX_TABLE_FIELDS) {
+            // discover until FT_NONE sentinel
+            for (j = 0; j < MAX_TABLE_FIELDS; j++) {
+                if (table->fields[j].type == FT_NONE) { table->fields_count = j; break; }
+            }
+        }
+        for (j = 0; j < table->fields_count; j++) {
+            if (table->fields[j].name) {
+                printf("Counting field: %s\n", table->fields[j].name);
+            }
 
 			if (table->fields[j].can_be_null) {
 				table->n_nullable++;

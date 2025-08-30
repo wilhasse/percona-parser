@@ -270,31 +270,47 @@ void debug_print_compact_row(const page_t* page,
  *
  *   Returns 0 if success, non-0 if error.
  */
+--- a/parser.cc
++++ b/parser.cc
+@@ int discover_primary_index_id(int fd)
+-  static const size_t kPageSize = 16384;
+-  struct stat stat_buf;
+-  if (fstat(fd, &stat_buf) == -1) { perror("fstat"); return 1; }
+-  int block_num = stat_buf.st_size / kPageSize;
+-  if (block_num == 0) { fprintf(stderr, "Empty file?\n"); return 1; }
+-  unsigned char page_buf[kPageSize];
+-  if (pread(fd, page_buf, kPageSize, 0) != (ssize_t)kPageSize) { perror("pread page0"); return 1; }
+@@
+-    if (pread(fd, page_buf, kPageSize, offset) != (ssize_t)kPageSize) {
++    if (pread(fd, page_buf.data(), kPageSize, offset) != (ssize_t)kPageSize) {
+       break;
+     }
+-    if (fil_page_get_type(page_buf) == FIL_PAGE_INDEX) {
++    if (fil_page_get_type(page_buf.data()) == FIL_PAGE_INDEX) {
+       bool is_root = btr_root_fseg_validate(page_buf + FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF, space_id)
+                   && btr_root_fseg_validate(page_buf + FIL_PAGE_DATA + PAGE_BTR_SEG_TOP, space_id);
+       if (is_root) {
+-        uint64_t idx_id_64 = read_uint64_from_page(page_buf + PAGE_HEADER + PAGE_INDEX_ID);
++        uint64_t idx_id_64 = read_uint64_from_page(page_buf.data() + PAGE_HEADER + PAGE_INDEX_ID);
+
+
 int discover_primary_index_id(int fd)
 {
 
-  // Standard Innodb Page Size
-  // TODO: I couldn't use UNIV_PAGE_SIZE due to variable-length array (VLA)
-  static const size_t kPageSize = 16384;
-
-  // 1) get file size
+  // Determine page size via MySQL helper
+  File mfd = (File)fd;
+  page_size_t pg_sz(0,0,false);
+  if (!determine_page_size(mfd, pg_sz)) { fprintf(stderr, "Cannot read page size\n"); return 1; }
+  const size_t kPageSize = pg_sz.physical();
+  // file size
   struct stat stat_buf;
-  if (fstat(fd, &stat_buf) == -1) {
-    perror("fstat");
-    return 1;
-  }
+  if (fstat(fd, &stat_buf) == -1) { perror("fstat"); return 1; }
+  const off_t total = stat_buf.st_size;
+  const off_t block_num = total / (off_t)kPageSize;
+  if (block_num <= 0) { fprintf(stderr, "Empty file?\n"); return 1; }
+  std::vector<unsigned char> page_buf(kPageSize);
+  if (pread(fd, page_buf.data(), kPageSize, 0) != (ssize_t)kPageSize) { perror("pread page0"); return 1; }
 
-  // 2) compute number of pages
-  int block_num = stat_buf.st_size / kPageSize;
-  if (block_num == 0) {
-    fprintf(stderr, "Empty file?\n");
-    return 1;
-  }
-
-  // 3) read the "space id" from page 0 
-  //    (this is used by btr_root_fseg_validate).
-  unsigned char page_buf[kPageSize];
-  if (pread(fd, page_buf, kPageSize, 0) != (ssize_t)kPageSize) {
     perror("pread page0");
     return 1;
   }
@@ -303,13 +319,13 @@ int discover_primary_index_id(int fd)
   // 4) loop over each page
   for (int i = 0; i < block_num; i++) {
     off_t offset = (off_t) i * kPageSize;
-    if (pread(fd, page_buf, kPageSize, offset) != (ssize_t)kPageSize) {
+    if (pread(fd, page_buf.data(), kPageSize, offset) != (ssize_t)kPageSize) {
       // partial read => break or return error
       break;
     }
 
     // check if FIL_PAGE_INDEX
-    if (fil_page_get_type(page_buf) == FIL_PAGE_INDEX) {
+    if (fil_page_get_type(page_buf.data()) == FIL_PAGE_INDEX) {
       // Check if this is a *root* page (like ShowIndexSummary does)
       // by verifying the fseg headers for leaf and top
       bool is_root = btr_root_fseg_validate(page_buf + FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF, space_id)
@@ -317,7 +333,7 @@ int discover_primary_index_id(int fd)
 
       if (is_root) {
         // We consider the *first* root we find as the "Primary index"
-        uint64_t idx_id_64 = read_uint64_from_page(page_buf + PAGE_HEADER + PAGE_INDEX_ID);
+        uint64_t idx_id_64 = read_uint64_from_page(page_buf.data() + PAGE_HEADER + PAGE_INDEX_ID);
         g_primary_index_id.high = static_cast<uint32_t>(idx_id_64 >> 32);
         g_primary_index_id.low  = static_cast<uint32_t>(idx_id_64 & 0xffffffff);
 
@@ -558,7 +574,7 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
             }
         }
 
-        MyColumnDef def;
+        MyColumnDef def{};
         def.name      = c["name"].GetString();
         def.type_utf8 = c["column_type_utf8"].GetString();
 
@@ -568,7 +584,13 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
         if (c.HasMember("char_length") && c["char_length"].IsUint()) {
             length = c["char_length"].GetUint();
         }
+
         def.length = length;
+        // optional flags
+        if (c.HasMember("is_nullable") && c["is_nullable"].IsBool())
+            def.is_nullable = c["is_nullable"].GetBool();
+        if (c.HasMember("is_unsigned") && c["is_unsigned"].IsBool())
+            def.is_unsigned = c["is_unsigned"].GetBool();
 
         // Add to global vector
         g_columns.push_back(def);
