@@ -1,8 +1,0 @@
-/home/cslog/percona-parser/build/CMakeFiles/ibd_reader_shared.dir
-/home/cslog/percona-parser/build/CMakeFiles/ib_parser.dir
-/home/cslog/percona-parser/build/CMakeFiles/edit_cache.dir
-/home/cslog/percona-parser/build/CMakeFiles/rebuild_cache.dir
-/home/cslog/percona-parser/build/CMakeFiles/list_install_components.dir
-/home/cslog/percona-parser/build/CMakeFiles/install.dir
-/home/cslog/percona-parser/build/CMakeFiles/install/local.dir
-/home/cslog/percona-parser/build/CMakeFiles/install/strip.dir
