@@ -26,7 +26,16 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${YELLOW}Step 1: Creating test database and compressed table${NC}"
-mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $DB_NAME;"
+# Clean up any leftover databases and directories completely
+echo "Performing complete cleanup of test databases..."
+sudo systemctl stop mysql 2>/dev/null || true
+sudo rm -rf "/var/lib/mysql/${DB_NAME}"* 2>/dev/null || true
+sudo rm -rf "/var/lib/mysql/${DB_NAME}_import"* 2>/dev/null || true
+sudo systemctl start mysql 2>/dev/null || true
+sleep 3
+
+mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null || true
+mysql -u$DB_USER -e "DROP DATABASE IF EXISTS ${DB_NAME}_import;" 2>/dev/null || true
 mysql -u$DB_USER -e "CREATE DATABASE $DB_NAME;"
 
 mysql -u$DB_USER $DB_NAME <<EOF
@@ -86,9 +95,6 @@ cd $PARSER_DIR
 
 echo -e "${YELLOW}Step 4: Creating new database for import${NC}"
 IMPORT_DB_NAME="${DB_NAME}_import"
-# Clean up any leftover directories first
-sudo rm -rf "/var/lib/mysql/${IMPORT_DB_NAME}*" 2>/dev/null || true
-mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $IMPORT_DB_NAME;" 2>/dev/null || true
 mysql -u$DB_USER -e "CREATE DATABASE $IMPORT_DB_NAME;"
 
 echo -e "${YELLOW}Step 5: Creating new uncompressed table with same structure${NC}"
