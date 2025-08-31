@@ -164,9 +164,10 @@ IBD_API ibd_result_t ibd_decompress_page(ibd_reader_t reader,
     
     if (reader) reader->clear_error();
     
-    // Determine if page is compressed
+    // Determine if page should be decompressed and process it
     size_t logical_size = *decompressed_size;
-    bool is_compressed = is_page_compressed(compressed, compressed_size, logical_size);
+    size_t actual_size = 0;
+    bool should_decompress = should_decompress_page(compressed, compressed_size, logical_size);
     
     // Fill page info if requested
     if (page_info) {
@@ -174,19 +175,24 @@ IBD_API ibd_result_t ibd_decompress_page(ibd_reader_t reader,
         page_info->page_type = mach_read_from_2(compressed + FIL_PAGE_TYPE);
         page_info->physical_size = compressed_size;
         page_info->logical_size = logical_size;
-        page_info->is_compressed = is_compressed ? 1 : 0;
+        page_info->is_compressed = should_decompress ? 1 : 0;
         page_info->is_encrypted = 0; // Would need to check encryption header
     }
     
-    // Decompress the page
+    // Process the page (decompress INDEX/RTREE or copy metadata)
     bool result = decompress_page_inplace(
         compressed,
         compressed_size,
-        is_compressed,
+        logical_size,
         decompressed,
         *decompressed_size,
-        logical_size
+        &actual_size
     );
+    
+    // Update the actual size used
+    if (result) {
+        *decompressed_size = actual_size;
+    }
     
     if (!result) {
         if (reader) reader->set_error("Page decompression failed");
@@ -350,7 +356,8 @@ IBD_API ibd_result_t ibd_get_page_info(const uint8_t* page_data,
 IBD_API int ibd_is_page_compressed(const uint8_t* page_data,
                                    size_t physical_size,
                                    size_t logical_size) {
-    return is_page_compressed(page_data, physical_size, logical_size) ? 1 : 0;
+    // For API compatibility: return 1 if tablespace appears compressed
+    return (physical_size < logical_size) ? 1 : 0;
 }
 
 IBD_API const char* ibd_get_page_type_name(uint16_t page_type) {

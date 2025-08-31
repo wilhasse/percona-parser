@@ -470,16 +470,14 @@ static int do_decrypt_then_decompress_main(int argc, char** argv)
     }
 
     // 2) Decompress in-place (if needed)
-    bool page_is_compressed =
-        is_page_compressed(page_buf.get(), physical_page_size, logical_page_size);
-
+    size_t actual_page_size = 0;
     bool cmp_ok = decompress_page_inplace(
         page_buf.get(),          /* src data        */
         physical_page_size,      /* physical_size   */
-        page_is_compressed,      /* is_compressed?  */
+        logical_page_size,       /* logical_size    */
         final_buf.get(),         /* output buffer   */
         logical_page_size,       /* out_buf_len     */
-        logical_page_size        /* "logical size"  */
+        &actual_page_size        /* actual size used */
     );
     if (!cmp_ok) {
       std::cerr << "Decompress failed on page " << page_number << "\n";
@@ -488,9 +486,9 @@ static int do_decrypt_then_decompress_main(int argc, char** argv)
       return 1;
     }
 
-    // 3) Write out the final uncompressed page
-    size_t wr = std::fwrite(final_buf.get(), 1, logical_page_size, fout);
-    if (wr < logical_page_size) {
+    // 3) Write out the final processed page
+    size_t wr = std::fwrite(final_buf.get(), 1, actual_page_size, fout);
+    if (wr < actual_page_size) {
       std::cerr << "Failed to write final page " << page_number << "\n";
       std::fclose(fin);
       std::fclose(fout);

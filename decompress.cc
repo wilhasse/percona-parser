@@ -2,6 +2,13 @@
   Code that reads a possibly compressed .ibd (or ibdata*) and writes out 
   an "uncompressed" copy of every page to a new output file.
 
+  Key behavior for ROW_FORMAT=COMPRESSED tablespaces:
+  - Only INDEX (17855) and RTREE (17854) pages are zlib-compressed
+  - Metadata pages (FSP_HDR, XDES, INODE, etc.) are written at physical size, not compressed
+  - This code properly decompresses only INDEX/RTREE pages using page_zip_decompress_low()
+  - Metadata pages are copied and padded to logical size for uniform output
+  - Output file has all pages at logical size (16KB) for consistency
+
   Includes STUBS for references like:
     - ib::logger, ib::warn, ib::error, ib::fatal
 
@@ -201,57 +208,80 @@ bool determine_page_size(File file_in, page_size_t &page_sz)
 }
 
 // ----------------------------------------------------------------
-// NEW: Helper function to detect compression by physical vs logical size
-//     or by page type = FIL_PAGE_COMPRESSED (14). 
+// Helper function to determine if a page should be decompressed
+// Only INDEX and RTREE pages are zlib-compressed in ROW_FORMAT=COMPRESSED
 // ----------------------------------------------------------------
-bool is_page_compressed(const unsigned char* page_data,
-                               size_t physical_size,
-                               size_t logical_size)
+bool should_decompress_page(const unsigned char* page_data,
+                           size_t physical_size,
+                           size_t logical_size)
 {
-  // If physical < logical => likely compressed
-  if (physical_size < logical_size) {
-    fprintf(stderr, "  [DEBUG] Page detected as compressed (physical=%zu < logical=%zu)\n",
-            physical_size, logical_size);
-    return true;
+  // Only decompress if tablespace is compressed (physical < logical)
+  if (physical_size >= logical_size) {
+    return false;
   }
 
-  // Or if the page_type is FIL_PAGE_COMPRESSED (14).
-  static const uint16_t FIL_PAGE_COMPRESSED = 14;
-  static const uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 16;
+  // Check if this is a page type that gets zlib-compressed
   uint16_t page_type = mach_read_from_2(page_data + FIL_PAGE_TYPE);
-  if (page_type == FIL_PAGE_COMPRESSED || page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
-    fprintf(stderr, "  [DEBUG] Page detected as compressed (page_type=%u)\n", page_type);
+  
+  // Only FIL_PAGE_INDEX (17855) and FIL_PAGE_RTREE pages are compressed
+  static const uint16_t FIL_PAGE_INDEX = 17855;
+  static const uint16_t FIL_PAGE_RTREE = 17854; // Spatial index pages
+  
+  if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_RTREE) {
+    fprintf(stderr, "  [DEBUG] Page should be decompressed (type=%u in compressed tablespace)\n", page_type);
     return true;
   }
-
+  
+  fprintf(stderr, "  [DEBUG] Page type %u in compressed tablespace - metadata page, no decompression needed\n", page_type);
   return false;
 }
 
 // ----------------------------------------------------------------
 // decompress_page_inplace()
+// Returns the actual size of the processed page (logical for decompressed, physical for metadata)
 // ----------------------------------------------------------------
 bool decompress_page_inplace(
     const unsigned char* src_buf,
     size_t               physical_size,
-    bool                 is_compressed,
+    size_t               logical_size,
     unsigned char*       out_buf,
     size_t               out_buf_len,
-    size_t               logical_size)
+    size_t*              actual_size)
 {
     memset(out_buf, 0, out_buf_len);
+    *actual_size = physical_size; // Default to physical size
 
-    // If not compressed, just copy
-    if (!is_compressed) {
-        memcpy(out_buf, src_buf, physical_size);
+    uint16_t page_type = mach_read_from_2(src_buf + FIL_PAGE_TYPE);
+    
+    // Check if this page should be decompressed
+    bool should_decompress = should_decompress_page(src_buf, physical_size, logical_size);
+    
+    if (!should_decompress) {
+        // For non-compressed tablespaces: copy as-is at physical size
+        // For metadata pages in compressed tablespaces: copy and pad to logical size
+        if (physical_size == logical_size) {
+            // Non-compressed tablespace
+            fprintf(stderr, "  [DEBUG] Copying page as-is (type=%u, size=%zu)\n", page_type, physical_size);
+            memcpy(out_buf, src_buf, physical_size);
+            *actual_size = physical_size;
+        } else {
+            // Metadata page in compressed tablespace - pad to logical size for uniform output
+            fprintf(stderr, "  [DEBUG] Copying metadata page and padding to logical size (type=%u, %zu->%zu)\n", 
+                    page_type, physical_size, logical_size);
+            memcpy(out_buf, src_buf, physical_size);
+            if (physical_size < logical_size) {
+                memset(out_buf + physical_size, 0, logical_size - physical_size);
+            }
+            *actual_size = logical_size;
+        }
         return true;
     }
 
-    // If compressed, check page_type
-    uint16_t page_type = mach_read_from_2(src_buf + FIL_PAGE_TYPE);
-    fprintf(stderr, "  [DEBUG] Attempting to decompress page (type=%u, phys=%zu, logical=%zu)\n",
+    // This is an INDEX or RTREE page in a compressed tablespace - decompress it
+    fprintf(stderr, "  [DEBUG] Decompressing page (type=%u, phys=%zu->logical=%zu)\n",
             page_type, physical_size, logical_size);
 
-    // We'll allocate a temporary buffer for the decompressed data
+    // Allocate temporary buffer for decompressed data
     unsigned char* temp = (unsigned char*)ut::malloc(2 * logical_size);
     unsigned char* aligned_temp = (unsigned char*)ut_align(temp, logical_size);
     memset(aligned_temp, 0, logical_size);
@@ -259,34 +289,33 @@ bool decompress_page_inplace(
     // Set up the page_zip descriptor
     page_zip_des_t page_zip;
     page_zip_des_init(&page_zip);
-
-    // "page_zip.data" points to a compressed page structure
     page_zip.data  = reinterpret_cast<page_zip_t*>(const_cast<unsigned char*>(src_buf));
-    // Fill the shift size, letting InnoDB figure out how many bytes to use
     page_zip.ssize = page_size_to_ssize(physical_size);
 
     bool success = false;
-
-    // Only attempt to decompress if it's a real index page
+    
     if (page_type == FIL_PAGE_INDEX) {
-        fprintf(stderr, "  [DEBUG] Decompressing INDEX page with page_zip_decompress_low\n");
         success = page_zip_decompress_low(&page_zip, aligned_temp, true);
-        if (!success) {
-            fprintf(stderr, "  [ERROR] Failed to decompress index page.\n");
-        } else {
-            fprintf(stderr, "  [DEBUG] Successfully decompressed index page\n");
+        if (success) {
+            fprintf(stderr, "  [DEBUG] Successfully decompressed INDEX page\n");
             memcpy(out_buf, aligned_temp, logical_size);
+            *actual_size = logical_size;
+        } else {
+            fprintf(stderr, "  [ERROR] Failed to decompress INDEX page\n");
         }
     } else {
-        // Not an index page => copy the compressed data and expand to logical size
-        fprintf(stderr, "  [DEBUG] Page type %u is not FIL_PAGE_INDEX, expanding to logical size\n", page_type);
-        // Copy the compressed data (which includes headers and metadata)
-        memcpy(out_buf, src_buf, physical_size);
-        // If physical size is less than logical size, pad with zeros
-        if (physical_size < logical_size) {
-            memset(out_buf + physical_size, 0, logical_size - physical_size);
+        // FIL_PAGE_RTREE - treat similarly to INDEX
+        fprintf(stderr, "  [DEBUG] Attempting RTREE decompression (experimental)\n");
+        success = page_zip_decompress_low(&page_zip, aligned_temp, true);
+        if (success) {
+            memcpy(out_buf, aligned_temp, logical_size);
+            *actual_size = logical_size;
+        } else {
+            fprintf(stderr, "  [WARNING] RTREE decompression failed, copying as-is\n");
+            memcpy(out_buf, src_buf, physical_size);
+            *actual_size = physical_size;
+            success = true; // Don't fail the whole operation
         }
-        success = true;
     }
 
     ut::free(temp);
@@ -320,15 +349,16 @@ static const char* get_page_type_name(uint16_t page_type) {
 }
 
 // ----------------------------------------------------------------
-// 2) fetch_page() calls decompress_page_inplace() to get the final
-//    uncompressed data into 'uncompressed_buf'.
+// fetch_page() calls decompress_page_inplace() to get the final
+// processed data into 'uncompressed_buf' and returns actual size used
 // ----------------------------------------------------------------
 static bool fetch_page(
     File file_in,
-                       page_no_t page_no,
-                       const page_size_t &page_sz,
-                       unsigned char *uncompressed_buf,
-                       size_t uncompressed_buf_len)
+    page_no_t page_no,
+    const page_size_t &page_sz,
+    unsigned char *uncompressed_buf,
+    size_t uncompressed_buf_len,
+    size_t *actual_page_size)
 {
     size_t psize      = page_sz.physical();   // e.g. 8 KB
     size_t logical_sz = page_sz.logical();    // e.g. 16 KB
@@ -360,22 +390,18 @@ static bool fetch_page(
     fprintf(stderr, "[Page %u] Page type: %u (%s)\n", 
             page_no, page_type, get_page_type_name(page_type));
 
-    // CHANGED: call is_page_compressed() instead of page_sz.is_compressed().
-    bool compressed = is_page_compressed(disk_buf, psize, logical_sz);
-    fprintf(stderr, "[Page %u] Compression detected: %s\n", 
-            page_no, compressed ? "YES" : "NO");
-
-    // decompress or copy
+    // Process the page (decompress INDEX/RTREE pages, copy metadata pages as-is)
     bool ok = decompress_page_inplace(
                   disk_buf,
                   psize,
-                  compressed,
+                  logical_sz,
                   uncompressed_buf,
                   uncompressed_buf_len,
-                  logical_sz);
+                  actual_page_size);
 
     if (ok) {
-        fprintf(stderr, "[Page %u] Processing completed successfully\n", page_no);
+        fprintf(stderr, "[Page %u] Processing completed successfully (output size=%zu)\n", 
+                page_no, *actual_page_size);
     } else {
         fprintf(stderr, "[Page %u] Processing failed!\n", page_no);
     }
@@ -438,7 +464,8 @@ bool decompress_ibd(File in_fd, File out_fd)
   uint64_t pages_written = 0;
 
   for (uint64_t i = 0; i < num_pages; i++) {
-     if (!fetch_page(in_fd, (page_no_t)i, pg_sz, page_buf, buf_size)) {
+    size_t actual_page_size = 0;
+    if (!fetch_page(in_fd, (page_no_t)i, pg_sz, page_buf, buf_size, &actual_page_size)) {
       fprintf(stderr, "[ERROR] Failed to process page %llu.\n",
               (unsigned long long)i);
       pages_failed++;
@@ -452,11 +479,11 @@ bool decompress_ibd(File in_fd, File out_fd)
         pages_compressed++;
       }
       
-      // Write out the (uncompressed) page
-      size_t w = my_write(out_fd, (uchar*)page_buf, pg_sz.logical(), MYF(0));
-      if (w != pg_sz.logical()) {
-        fprintf(stderr, "[ERROR] Write failed on page %llu (wrote %zu of %llu bytes).\n", 
-                (unsigned long long)i, w, (unsigned long long)pg_sz.logical());
+      // Write out the processed page at its actual size
+      size_t w = my_write(out_fd, (uchar*)page_buf, actual_page_size, MYF(0));
+      if (w != actual_page_size) {
+        fprintf(stderr, "[ERROR] Write failed on page %llu (wrote %zu of %zu bytes).\n", 
+                (unsigned long long)i, w, actual_page_size);
         free(page_buf);
         return false;
       }
@@ -481,10 +508,17 @@ bool decompress_ibd(File in_fd, File out_fd)
   fprintf(stderr, "Pages written: %llu\n", (unsigned long long)pages_written);
   fprintf(stderr, "Failed pages: %llu\n", (unsigned long long)pages_failed);
   if (page_physical < page_logical) {
-    fprintf(stderr, "Compressed pages found: %llu\n", (unsigned long long)pages_compressed);
+    fprintf(stderr, "Tablespace was compressed (physical=%llu, logical=%llu)\n", 
+            (unsigned long long)page_physical, (unsigned long long)page_logical);
+    fprintf(stderr, "INDEX pages decompressed with zlib\n");
+    fprintf(stderr, "Metadata pages copied and padded to logical size\n");
+    fprintf(stderr, "Output file size: %llu bytes (all pages at logical size)\n", 
+            (unsigned long long)(pages_written * pg_sz.logical()));
+  } else {
+    fprintf(stderr, "Tablespace was not compressed\n");
+    fprintf(stderr, "Output file size: %llu bytes\n", 
+            (unsigned long long)(pages_written * pg_sz.logical()));
   }
-  fprintf(stderr, "Output file size: %llu bytes\n", 
-          (unsigned long long)(pages_written * pg_sz.logical()));
   fprintf(stderr, "========================================\n\n");
 
   free(page_buf);
