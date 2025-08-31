@@ -3,11 +3,11 @@
   an "uncompressed" copy of every page to a new output file.
 
   Key behavior for ROW_FORMAT=COMPRESSED tablespaces:
-  - Only INDEX (17855) and RTREE (17854) pages are zlib-compressed
+  - Only INDEX (17855) and RTREE (17854) pages are zlib-compressed  
   - Metadata pages (FSP_HDR, XDES, INODE, etc.) are written at physical size, not compressed
   - This code properly decompresses only INDEX/RTREE pages using page_zip_decompress_low()
-  - Metadata pages are copied and padded to logical size for uniform output
-  - Output file has all pages at logical size (16KB) for consistency
+  - Metadata pages are kept at their natural physical size (as stored on disk)
+  - Output file has mixed page sizes: INDEX at logical size, metadata at physical size
 
   Includes STUBS for references like:
     - ib::logger, ib::warn, ib::error, ib::fatal
@@ -257,23 +257,11 @@ bool decompress_page_inplace(
     bool should_decompress = should_decompress_page(src_buf, physical_size, logical_size);
     
     if (!should_decompress) {
-        // For non-compressed tablespaces: copy as-is at physical size
-        // For metadata pages in compressed tablespaces: copy and pad to logical size
-        if (physical_size == logical_size) {
-            // Non-compressed tablespace
-            fprintf(stderr, "  [DEBUG] Copying page as-is (type=%u, size=%zu)\n", page_type, physical_size);
-            memcpy(out_buf, src_buf, physical_size);
-            *actual_size = physical_size;
-        } else {
-            // Metadata page in compressed tablespace - pad to logical size for uniform output
-            fprintf(stderr, "  [DEBUG] Copying metadata page and padding to logical size (type=%u, %zu->%zu)\n", 
-                    page_type, physical_size, logical_size);
-            memcpy(out_buf, src_buf, physical_size);
-            if (physical_size < logical_size) {
-                memset(out_buf + physical_size, 0, logical_size - physical_size);
-            }
-            *actual_size = logical_size;
-        }
+        // For non-compressed tablespaces OR metadata pages in compressed tablespaces:
+        // Copy as-is at physical size (metadata pages are naturally at physical size)
+        fprintf(stderr, "  [DEBUG] Copying page as-is at physical size (type=%u, size=%zu)\n", page_type, physical_size);
+        memcpy(out_buf, src_buf, physical_size);
+        *actual_size = physical_size;
         return true;
     }
 
@@ -510,15 +498,13 @@ bool decompress_ibd(File in_fd, File out_fd)
   if (page_physical < page_logical) {
     fprintf(stderr, "Tablespace was compressed (physical=%llu, logical=%llu)\n", 
             (unsigned long long)page_physical, (unsigned long long)page_logical);
-    fprintf(stderr, "INDEX pages decompressed with zlib\n");
-    fprintf(stderr, "Metadata pages copied and padded to logical size\n");
-    fprintf(stderr, "Output file size: %llu bytes (all pages at logical size)\n", 
-            (unsigned long long)(pages_written * pg_sz.logical()));
+    fprintf(stderr, "INDEX pages decompressed with zlib to logical size\n");
+    fprintf(stderr, "Metadata pages kept at physical size (as stored on disk)\n");
+    fprintf(stderr, "Output has mixed page sizes - INDEX pages at logical size, metadata at physical\n");
   } else {
     fprintf(stderr, "Tablespace was not compressed\n");
-    fprintf(stderr, "Output file size: %llu bytes\n", 
-            (unsigned long long)(pages_written * pg_sz.logical()));
   }
+  fprintf(stderr, "Output file written successfully\n");
   fprintf(stderr, "========================================\n\n");
 
   free(page_buf);

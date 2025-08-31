@@ -86,7 +86,9 @@ cd $PARSER_DIR
 
 echo -e "${YELLOW}Step 4: Creating new database for import${NC}"
 IMPORT_DB_NAME="${DB_NAME}_import"
-mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $IMPORT_DB_NAME;"
+# Clean up any leftover directories first
+sudo rm -rf "/var/lib/mysql/${IMPORT_DB_NAME}*" 2>/dev/null || true
+mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $IMPORT_DB_NAME;" 2>/dev/null || true
 mysql -u$DB_USER -e "CREATE DATABASE $IMPORT_DB_NAME;"
 
 echo -e "${YELLOW}Step 5: Creating new uncompressed table with same structure${NC}"
