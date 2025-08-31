@@ -28,14 +28,24 @@ NC='\033[0m' # No Color
 echo -e "${YELLOW}Step 1: Creating test database and compressed table${NC}"
 # Clean up any leftover databases and directories completely
 echo "Performing complete cleanup of test databases..."
-sudo systemctl stop mysql 2>/dev/null || true
-sudo rm -rf "/var/lib/mysql/${DB_NAME}"* 2>/dev/null || true
-sudo rm -rf "/var/lib/mysql/${DB_NAME}_import"* 2>/dev/null || true
-sudo systemctl start mysql 2>/dev/null || true
-sleep 3
 
+# First try to drop databases in MySQL if MySQL is running
 mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null || true
 mysql -u$DB_USER -e "DROP DATABASE IF EXISTS ${DB_NAME}_import;" 2>/dev/null || true
+
+# Then stop MySQL and clean up filesystem
+sudo systemctl stop mysql
+sleep 2
+sudo rm -rf "/var/lib/mysql/${DB_NAME}"* 
+sudo rm -rf "/var/lib/mysql/${DB_NAME}_import"*
+sudo systemctl start mysql
+sleep 3
+
+# Verify MySQL is ready
+while ! mysql -u$DB_USER -e "SELECT 1;" >/dev/null 2>&1; do
+    echo "Waiting for MySQL to be ready..."
+    sleep 1
+done
 mysql -u$DB_USER -e "CREATE DATABASE $DB_NAME;"
 
 mysql -u$DB_USER $DB_NAME <<EOF
@@ -84,14 +94,14 @@ if ! sudo test -f "$IBD_PATH"; then
 fi
 
 # Copy the .ibd file for processing (using sudo)
-sudo cp "$IBD_PATH" "$PARSER_DIR/tests/${TABLE_NAME}_compressed.ibd"
-sudo chown $(whoami):$(whoami) "$PARSER_DIR/tests/${TABLE_NAME}_compressed.ibd"
+sudo cp "$IBD_PATH" "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_compressed.ibd"
+sudo chown $(whoami):$(whoami) "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_compressed.ibd"
 
 mysql -u$DB_USER $DB_NAME -e "UNLOCK TABLES;"
 
 echo -e "${YELLOW}Step 3: Decompressing with ib_parser${NC}"
 cd $PARSER_DIR
-./build/ib_parser 2 "tests/${TABLE_NAME}_compressed.ibd" "tests/${TABLE_NAME}_decompressed.ibd"
+./build/ib_parser 2 "tests/ibd_files/${TABLE_NAME}_compressed.ibd" "tests/ibd_files/${TABLE_NAME}_decompressed.ibd"
 
 echo -e "${YELLOW}Step 4: Creating new database for import${NC}"
 IMPORT_DB_NAME="${DB_NAME}_import"
@@ -117,7 +127,7 @@ echo -e "${YELLOW}Step 8: Copying decompressed file and removing original to avo
 # Remove the original compressed table's .ibd to avoid tablespace ID conflict
 sudo rm -f "$MYSQL_DATA_DIR/$DB_NAME/${TABLE_NAME}.ibd"
 # Copy the decompressed file
-sudo cp "$PARSER_DIR/tests/${TABLE_NAME}_decompressed.ibd" "$MYSQL_DATA_DIR/$IMPORT_DB_NAME/${IMPORT_TABLE}.ibd"
+sudo cp "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_decompressed.ibd" "$MYSQL_DATA_DIR/$IMPORT_DB_NAME/${IMPORT_TABLE}.ibd"
 sudo chown mysql:mysql "$MYSQL_DATA_DIR/$IMPORT_DB_NAME/${IMPORT_TABLE}.ibd"
 sudo chmod 640 "$MYSQL_DATA_DIR/$IMPORT_DB_NAME/${IMPORT_TABLE}.ibd"
 
@@ -143,15 +153,15 @@ echo ""
 echo "Verifying decompression by text inspection:"
 echo ""
 echo "Original compressed file (should have limited readable data):"
-strings tests/${TABLE_NAME}_compressed.ibd 2>/dev/null | grep -E "(First|Second|Third|Fourth|Fifth)" | head -3 || echo "  No directly readable text in compressed pages"
+strings tests/ibd_files/${TABLE_NAME}_compressed.ibd 2>/dev/null | grep -E "(First|Second|Third|Fourth|Fifth)" | head -3 || echo "  No directly readable text in compressed pages"
 echo ""
 echo "Decompressed file (should have readable data from INDEX pages):"
-strings tests/${TABLE_NAME}_decompressed.ibd 2>/dev/null | grep -E "(First|Second|Third|Fourth|Fifth)" | head -5 || echo "  Check if table has INDEX pages"
+strings tests/ibd_files/${TABLE_NAME}_decompressed.ibd 2>/dev/null | grep -E "(First|Second|Third|Fourth|Fifth)" | head -5 || echo "  Check if table has INDEX pages"
 echo ""
 
 # Check file sizes to show decompression effect
-COMPRESSED_SIZE=$(stat -c%s tests/${TABLE_NAME}_compressed.ibd 2>/dev/null || echo 0)
-DECOMPRESSED_SIZE=$(stat -c%s tests/${TABLE_NAME}_decompressed.ibd 2>/dev/null || echo 0)
+COMPRESSED_SIZE=$(stat -c%s tests/ibd_files/${TABLE_NAME}_compressed.ibd 2>/dev/null || echo 0)
+DECOMPRESSED_SIZE=$(stat -c%s tests/ibd_files/${TABLE_NAME}_decompressed.ibd 2>/dev/null || echo 0)
 
 echo "File size comparison:"
 echo "  Compressed file:   $COMPRESSED_SIZE bytes"
@@ -169,8 +179,8 @@ else
 fi
 
 echo -e "${YELLOW}Step 12: Cleanup${NC}"
-rm -f "$PARSER_DIR/tests/${TABLE_NAME}_compressed.ibd"
-rm -f "$PARSER_DIR/tests/${TABLE_NAME}_decompressed.ibd"
+rm -f "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_compressed.ibd"
+rm -f "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_decompressed.ibd"
 
 echo -e "${GREEN}Compressed table test completed!${NC}"
 echo "Databases '$DB_NAME' and '$IMPORT_DB_NAME' kept for inspection. Drop them manually if needed."
