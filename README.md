@@ -132,4 +132,8 @@ When contributing:
 
 ## License
 
-This project is part of Percona Server tools and follows Percona licensing terms.
+This is an independent open-source project under development. It links against Percona Server libraries (GPL v2) and incorporates adapted code from the undrop-for-innodb project.
+
+The project is provided "as is" without warranty of any kind. See LICENSE file for details.
+
+**Note**: This is a personal research/development project and is not affiliated with or endorsed by Percona.
