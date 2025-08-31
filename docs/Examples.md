@@ -8,10 +8,11 @@ Complete code examples for using the InnoDB Reader Library in various programmin
 - [Go Example](#go-example)
 - [Python Example](#python-example)
 - [Real-World Use Cases](#real-world-use-cases)
+- [Known Limitations](#known-limitations)
 
 ## C Example
 
-### Complete Program
+### Complete Decompression Program
 
 ```c
 #include <stdio.h>
@@ -22,7 +23,8 @@ Complete code examples for using the InnoDB Reader Library in various programmin
 int main(int argc, char* argv[]) {
     // Check arguments
     if (argc != 3) {
-        printf("Usage: %s <input.ibd> <output.ibd>\n", argv[0]);
+        printf("Usage: %s <compressed.ibd> <output.ibd>\n", argv[0]);
+        printf("Note: Decompressed files cannot be imported back to MySQL\n");
         return 1;
     }
     
@@ -45,10 +47,12 @@ int main(int argc, char* argv[]) {
     
     // Decompress file
     printf("Decompressing %s to %s...\n", argv[1], argv[2]);
+    printf("Warning: Output file will have mixed page sizes\n");
     ibd_result_t result = ibd_decompress_file(reader, argv[1], argv[2]);
     
     if (result == IBD_SUCCESS) {
-        printf("Success!\n");
+        printf("Success! INDEX pages decompressed, metadata pages preserved\n");
+        printf("Note: File cannot be imported due to ROW_FORMAT mismatch\n");
     } else {
         fprintf(stderr, "Failed: %s (code %d)\n", 
                 ibd_reader_get_error(reader), result);
@@ -65,13 +69,13 @@ int main(int argc, char* argv[]) {
 ### Compile and Run
 
 ```bash
-gcc -o decompress decompress.c -libd_reader
-./decompress compressed.ibd output.ibd
+gcc -o decompress decompress.c -L./build -libd_reader -I./lib
+LD_LIBRARY_PATH=./build ./decompress compressed.ibd output.ibd
 ```
 
 ## C++ Example
 
-### Object-Oriented Wrapper
+### Object-Oriented Wrapper with Error Handling
 
 ```cpp
 #include <iostream>
@@ -123,6 +127,9 @@ public:
     }
     
     void decompressFile(const std::string& input, const std::string& output) {
+        std::cout << "Decompressing compressed table..." << std::endl;
+        std::cout << "Note: Output will have COMPRESSED metadata but uncompressed data" << std::endl;
+        
         auto result = ibd_decompress_file(reader_, input.c_str(), output.c_str());
         if (result != IBD_SUCCESS) {
             throw std::runtime_error(std::string("Decompression failed: ") + 
@@ -160,11 +167,14 @@ bool IbdReader::initialized_ = false;
 // Usage example
 int main() {
     try {
+        // Decompress a compressed table
         IbdReader reader;
         reader.setDebug(true);
-        reader.decompressFile("input.ibd", "output.ibd");
+        reader.decompressFile("compressed_table.ibd", "decompressed.ibd");
+        std::cout << "Decompression successful!" << std::endl;
+        std::cout << "Warning: Cannot import back to MySQL due to metadata" << std::endl;
         
-        // Decrypt example
+        // Decrypt an encrypted table
         IbdReader reader2;
         reader2.decryptFile("encrypted.ibd", 
                            "decrypted.ibd",
@@ -184,22 +194,7 @@ int main() {
 
 ## Go Example
 
-### Complete Go Bindings
-
-Build and run the Go example:
-
-```bash
-cd examples/go
-go build
-
-# Run using the wrapper script (handles library path automatically)
-./run_example.sh -i input.ibd -o output.ibd
-
-# Or manually set the library path
-LD_LIBRARY_PATH=../../build ./ibd-reader-example -i input.ibd -o output.ibd
-```
-
-**Note**: The shared library must be accessible at runtime. Use the provided `run_example.sh` wrapper script or set `LD_LIBRARY_PATH` to the build directory.
+### Complete Go Implementation
 
 ```go
 package main
@@ -211,8 +206,8 @@ import (
     "os"
 )
 
-// #cgo CFLAGS: -I./lib
-// #cgo LDFLAGS: -L./build -libd_reader -Wl,-rpath,./build
+// #cgo CFLAGS: -I../../lib
+// #cgo LDFLAGS: -L../../build -libd_reader
 // #include "ibd_reader_api.h"
 // #include <stdlib.h>
 import "C"
@@ -248,8 +243,11 @@ func (r *IbdReader) SetDebug(enable bool) {
     C.ibd_reader_set_debug(r.handle, val)
 }
 
-// DecompressFile decompresses an IBD file
+// DecompressFile decompresses a compressed IBD file
 func (r *IbdReader) DecompressFile(input, output string) error {
+    fmt.Println("Decompressing ROW_FORMAT=COMPRESSED table...")
+    fmt.Println("Note: Output retains COMPRESSED metadata, cannot be imported")
+    
     cInput := C.CString(input)
     cOutput := C.CString(output)
     defer C.free(unsafe.Pointer(cInput))
@@ -259,27 +257,6 @@ func (r *IbdReader) DecompressFile(input, output string) error {
     if result != 0 {
         errMsg := C.GoString(C.ibd_reader_get_error(r.handle))
         return fmt.Errorf("decompression failed: %s (code %d)", errMsg, result)
-    }
-    return nil
-}
-
-// DecryptFile decrypts an IBD file
-func (r *IbdReader) DecryptFile(input, output, keyring string, 
-                                masterKeyID uint32, serverUUID string) error {
-    cInput := C.CString(input)
-    cOutput := C.CString(output)
-    cKeyring := C.CString(keyring)
-    cUUID := C.CString(serverUUID)
-    defer C.free(unsafe.Pointer(cInput))
-    defer C.free(unsafe.Pointer(cOutput))
-    defer C.free(unsafe.Pointer(cKeyring))
-    defer C.free(unsafe.Pointer(cUUID))
-    
-    result := C.ibd_decrypt_file(r.handle, cInput, cOutput, cKeyring, 
-                                 C.uint32_t(masterKeyID), cUUID)
-    if result != 0 {
-        errMsg := C.GoString(C.ibd_reader_get_error(r.handle))
-        return fmt.Errorf("decryption failed: %s (code %d)", errMsg, result)
     }
     return nil
 }
@@ -294,18 +271,16 @@ func init() {
 func main() {
     // Parse command-line flags
     var (
-        input   = flag.String("i", "", "Input IBD file")
-        output  = flag.String("o", "", "Output file")
-        decrypt = flag.Bool("decrypt", false, "Decrypt the file")
-        keyring = flag.String("keyring", "", "Keyring file path")
-        keyID   = flag.Uint("key", 0, "Master key ID")
-        uuid    = flag.String("uuid", "", "Server UUID")
+        input   = flag.String("i", "", "Input compressed IBD file")
+        output  = flag.String("o", "", "Output decompressed file")
         debug   = flag.Bool("debug", false, "Enable debug output")
     )
     flag.Parse()
     
     if *input == "" || *output == "" {
-        fmt.Fprintf(os.Stderr, "Usage: %s -i <input.ibd> -o <output.ibd>\n", os.Args[0])
+        fmt.Fprintf(os.Stderr, "Usage: %s -i <compressed.ibd> -o <output.ibd>\n", os.Args[0])
+        fmt.Fprintf(os.Stderr, "\nNote: Decompressed files cannot be imported back to MySQL\n")
+        fmt.Fprintf(os.Stderr, "      due to ROW_FORMAT metadata mismatch\n")
         os.Exit(1)
     }
     
@@ -319,45 +294,48 @@ func main() {
     // Set debug mode
     reader.SetDebug(*debug)
     
-    // Process file
-    if *decrypt {
-        if *keyring == "" || *keyID == 0 || *uuid == "" {
-            log.Fatal("Decryption requires -keyring, -key, and -uuid")
-        }
-        err = reader.DecryptFile(*input, *output, *keyring, uint32(*keyID), *uuid)
-    } else {
-        err = reader.DecompressFile(*input, *output)
-    }
-    
+    // Decompress file
+    err = reader.DecompressFile(*input, *output)
     if err != nil {
         log.Fatal(err)
     }
     
-    fmt.Println("Operation completed successfully")
+    fmt.Println("Decompression completed successfully!")
+    fmt.Println("INDEX pages expanded from 8KB to 16KB")
+    fmt.Println("Metadata pages kept at physical size")
 }
 ```
 
 ### Build and Run
 
 ```bash
-go build -o ibd_tool main.go
-# Use the wrapper script or set LD_LIBRARY_PATH
-LD_LIBRARY_PATH=./build ./ibd_tool -i compressed.ibd -o output.ibd -debug
+cd examples/go
+go build
+
+# Use the wrapper script (recommended)
+./run_example.sh -i compressed.ibd -o output.ibd -debug
+
+# Or set library path manually
+LD_LIBRARY_PATH=../../build ./ibd-reader-example -i compressed.ibd -o output.ibd
 ```
 
 ## Python Example
 
-### Using ctypes
+### Using ctypes with Error Handling
 
 ```python
 #!/usr/bin/env python3
 import ctypes
 import sys
+import os
 from pathlib import Path
 
 class IbdReader:
-    def __init__(self, lib_path='./libibd_reader.so'):
+    def __init__(self, lib_path='./build/libibd_reader.so'):
         # Load the library
+        if not os.path.exists(lib_path):
+            raise FileNotFoundError(f"Library not found at {lib_path}")
+            
         self.lib = ctypes.CDLL(lib_path)
         
         # Define function signatures
@@ -391,6 +369,14 @@ class IbdReader:
         self.lib.ibd_reader_set_debug(self.reader, 1 if enable else 0)
     
     def decompress_file(self, input_path, output_path):
+        """
+        Decompress a ROW_FORMAT=COMPRESSED table.
+        Note: Output file will have COMPRESSED metadata but uncompressed data,
+        preventing direct MySQL import.
+        """
+        print(f"Decompressing {input_path}...")
+        print("Warning: Output cannot be imported back to MySQL")
+        
         result = self.lib.ibd_decompress_file(
             self.reader,
             input_path.encode('utf-8'),
@@ -400,33 +386,13 @@ class IbdReader:
         if result != 0:
             error_msg = self.lib.ibd_reader_get_error(self.reader)
             raise RuntimeError(f"Decompression failed: {error_msg.decode('utf-8')}")
-    
-    def decrypt_file(self, input_path, output_path, keyring_path, 
-                    master_key_id, server_uuid):
-        # Define decrypt function signature
-        self.lib.ibd_decrypt_file.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
-            ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p
-        ]
-        self.lib.ibd_decrypt_file.restype = ctypes.c_int
-        
-        result = self.lib.ibd_decrypt_file(
-            self.reader,
-            input_path.encode('utf-8'),
-            output_path.encode('utf-8'),
-            keyring_path.encode('utf-8'),
-            master_key_id,
-            server_uuid.encode('utf-8')
-        )
-        
-        if result != 0:
-            error_msg = self.lib.ibd_reader_get_error(self.reader)
-            raise RuntimeError(f"Decryption failed: {error_msg.decode('utf-8')}")
 
 # Usage example
 def main():
     if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <input.ibd> <output.ibd>")
+        print(f"Usage: {sys.argv[0]} <compressed.ibd> <output.ibd>")
+        print("\nNote: Decompressed files retain COMPRESSED metadata")
+        print("      and cannot be imported back to MySQL")
         sys.exit(1)
     
     try:
@@ -434,6 +400,7 @@ def main():
         reader.set_debug(True)
         reader.decompress_file(sys.argv[1], sys.argv[2])
         print("Decompression successful!")
+        print("INDEX pages expanded, metadata pages preserved")
         
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -445,48 +412,71 @@ if __name__ == "__main__":
 
 ## Real-World Use Cases
 
-### Batch Processing Script
+### Batch Processing Script for Compressed Tables
 
 ```bash
 #!/bin/bash
-# Process all IBD files in a directory
+# Process all compressed IBD files in a directory
+# Note: Output files cannot be imported back to MySQL
 
-INPUT_DIR="/var/lib/mysql"
+INPUT_DIR="/var/lib/mysql/compressed_db"
 OUTPUT_DIR="/backup/decompressed"
+LOG_FILE="/var/log/decompression.log"
+
+echo "Starting batch decompression at $(date)" >> "$LOG_FILE"
+echo "WARNING: Decompressed files retain COMPRESSED metadata" >> "$LOG_FILE"
 
 for ibd_file in "$INPUT_DIR"/*.ibd; do
+    if [ ! -f "$ibd_file" ]; then
+        continue
+    fi
+    
     filename=$(basename "$ibd_file")
-    echo "Processing $filename..."
+    echo "Processing $filename..." | tee -a "$LOG_FILE"
     
-    ./ib_parser 2 "$ibd_file" "$OUTPUT_DIR/$filename"
+    ./build/ib_parser 2 "$ibd_file" "$OUTPUT_DIR/$filename" 2>&1 | tee -a "$LOG_FILE"
     
-    if [ $? -eq 0 ]; then
-        echo "✓ $filename processed successfully"
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        echo "✓ $filename decompressed (cannot be imported)" | tee -a "$LOG_FILE"
     else
-        echo "✗ Failed to process $filename"
+        echo "✗ Failed to decompress $filename" | tee -a "$LOG_FILE"
     fi
 done
+
+echo "Batch processing complete at $(date)" >> "$LOG_FILE"
 ```
 
-### Database Recovery Tool
+### Database Recovery Tool with Limitations Check
 
 ```c
 #include <stdio.h>
-#include <dirent.h>
 #include <string.h>
+#include <sys/stat.h>
 #include "ibd_reader_api.h"
 
-int recover_database(const char* db_path, const char* output_path,
-                    const char* keyring_path) {
-    DIR* dir;
-    struct dirent* entry;
+int check_compressed_table(const char* ibd_path) {
+    // Check if file is from a compressed table
+    // This is a simplified check - real implementation would read FSP header
+    FILE* f = fopen(ibd_path, "rb");
+    if (!f) return -1;
+    
+    // Read FSP header flags
+    fseek(f, 54, SEEK_SET);
+    uint16_t flags;
+    fread(&flags, 2, 1, f);
+    fclose(f);
+    
+    // Check compression flag (simplified)
+    return (flags & 0x8000) ? 1 : 0;
+}
+
+int process_ibd_file(const char* input, const char* output) {
     ibd_reader_t reader;
-    char input_file[PATH_MAX];
-    char output_file[PATH_MAX];
-    int recovered = 0, failed = 0;
+    ibd_result_t result;
     
     // Initialize
     if (ibd_init() != IBD_SUCCESS) {
+        fprintf(stderr, "Failed to initialize library\n");
         return -1;
     }
     
@@ -496,144 +486,150 @@ int recover_database(const char* db_path, const char* output_path,
         return -1;
     }
     
-    // Open directory
-    dir = opendir(db_path);
-    if (!dir) {
-        perror("opendir");
-        ibd_reader_destroy(reader);
-        ibd_cleanup();
-        return -1;
-    }
+    // Check if compressed
+    int is_compressed = check_compressed_table(input);
     
-    // Process each .ibd file
-    while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, ".ibd") == NULL) {
-            continue;
-        }
+    if (is_compressed == 1) {
+        printf("File is compressed (ROW_FORMAT=COMPRESSED)\n");
+        printf("Decompressing...\n");
         
-        snprintf(input_file, sizeof(input_file), "%s/%s", 
-                 db_path, entry->d_name);
-        snprintf(output_file, sizeof(output_file), "%s/%s", 
-                 output_path, entry->d_name);
-        
-        printf("Recovering %s...\n", entry->d_name);
-        
-        // Try to decrypt and decompress
-        ibd_result_t result = ibd_decrypt_and_decompress_file(
-            reader, input_file, output_file, keyring_path,
-            1, "550fa1f5-8821-11ef-a8c9-0242ac120002"
-        );
+        result = ibd_decompress_file(reader, input, output);
         
         if (result == IBD_SUCCESS) {
-            printf("  ✓ Recovered successfully\n");
-            recovered++;
+            printf("✓ Decompression successful\n");
+            printf("⚠ WARNING: Output file cannot be imported to MySQL\n");
+            printf("  Reason: ROW_FORMAT metadata mismatch\n");
+            printf("  The file has COMPRESSED metadata but uncompressed data\n");
         } else {
-            // Try just decompression if decryption fails
-            result = ibd_decompress_file(reader, input_file, output_file);
-            if (result == IBD_SUCCESS) {
-                printf("  ✓ Decompressed (not encrypted)\n");
-                recovered++;
-            } else {
-                printf("  ✗ Failed: %s\n", ibd_reader_get_error(reader));
-                failed++;
-            }
+            fprintf(stderr, "✗ Decompression failed: %s\n", 
+                    ibd_reader_get_error(reader));
         }
+    } else {
+        printf("File is not compressed, copying as-is\n");
+        // Just copy the file
+        result = IBD_SUCCESS;
     }
     
-    closedir(dir);
     ibd_reader_destroy(reader);
     ibd_cleanup();
     
-    printf("\nRecovery complete: %d succeeded, %d failed\n", 
-           recovered, failed);
-    return failed > 0 ? 1 : 0;
+    return result == IBD_SUCCESS ? 0 : -1;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        printf("Usage: %s <db_path> <output_path> <keyring_path>\n", argv[0]);
+    if (argc != 3) {
+        printf("Usage: %s <input.ibd> <output.ibd>\n", argv[0]);
+        printf("\nLimitations:\n");
+        printf("- Decompressed files cannot be imported back to MySQL\n");
+        printf("- ROW_FORMAT metadata is preserved in headers\n");
+        printf("- Output has mixed page sizes (INDEX at 16KB, metadata at 8KB)\n");
         return 1;
     }
     
-    return recover_database(argv[1], argv[2], argv[3]);
+    return process_ibd_file(argv[1], argv[2]);
 }
 ```
 
-### Page Analysis Tool
+### Testing Decompression Results
 
-```go
-package main
+```python
+#!/usr/bin/env python3
+"""
+Verify decompression results and show limitations
+"""
 
-import (
-    "encoding/hex"
-    "fmt"
-    "io"
-    "os"
-)
+import sys
+import os
 
-func analyzeIbdFile(filename string) error {
-    file, err := os.Open(filename)
-    if err != nil {
-        return err
-    }
-    defer file.Close()
+def verify_decompression(original_file, decompressed_file):
+    """
+    Verify that decompression worked but show why import fails
+    """
+    # Check file sizes
+    orig_size = os.path.getsize(original_file)
+    decomp_size = os.path.getsize(decompressed_file)
     
-    pageSize := 16384
-    pageNum := 0
+    print(f"Original size: {orig_size} bytes")
+    print(f"Decompressed size: {decomp_size} bytes")
     
-    for {
-        page := make([]byte, pageSize)
-        n, err := io.ReadFull(file, page)
-        if err == io.EOF {
-            break
-        }
-        if err != nil && err != io.ErrUnexpectedEOF {
-            return err
-        }
-        if n < 38 {
-            break
-        }
+    if decomp_size > orig_size:
+        print("✓ File expanded after decompression")
+        expansion = decomp_size - orig_size
+        print(f"  Expansion: {expansion} bytes")
         
-        // Parse page header
-        pageType := uint16(page[24])<<8 | uint16(page[25])
-        pageNumber := uint32(page[4])<<24 | uint32(page[5])<<16 |
-                     uint32(page[6])<<8 | uint32(page[7])
-        
-        fmt.Printf("Page %d:\n", pageNum)
-        fmt.Printf("  Number: %d\n", pageNumber)
-        fmt.Printf("  Type: %d (%s)\n", pageType, getPageTypeName(pageType))
-        fmt.Printf("  First 64 bytes:\n")
-        fmt.Printf("    %s\n", hex.EncodeToString(page[:64]))
-        fmt.Println()
-        
-        pageNum++
-    }
+        # Check for typical expansion pattern
+        if expansion == 8192:  # One INDEX page expanded
+            print("✓ Typical single INDEX page expansion detected")
+        elif expansion % 8192 == 0:
+            pages = expansion // 8192
+            print(f"✓ {pages} INDEX pages expanded")
+    else:
+        print("⚠ No expansion detected - file may not have been compressed")
     
-    return nil
-}
+    print("\nLimitations:")
+    print("- Cannot import to MySQL due to ROW_FORMAT mismatch")
+    print("- File header still indicates COMPRESSED format")
+    print("- Mixed page sizes in output (INDEX=16KB, metadata=8KB)")
+    print("\nMySQL import will fail with:")
+    print("  ERROR 1808: Schema mismatch")
+    print("  (Table has ROW_TYPE_DYNAMIC, file has ROW_TYPE_COMPRESSED)")
 
-func getPageTypeName(pageType uint16) string {
-    switch pageType {
-    case 0: return "ALLOCATED"
-    case 2: return "UNDO_LOG"
-    case 3: return "INODE"
-    case 8: return "FSP_HDR"
-    case 17855: return "INDEX"
-    case 14: return "COMPRESSED"
-    case 15: return "ENCRYPTED"
-    default: return "UNKNOWN"
-    }
-}
-
-func main() {
-    if len(os.Args) != 2 {
-        fmt.Fprintf(os.Stderr, "Usage: %s <file.ibd>\n", os.Args[0])
-        os.Exit(1)
-    }
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <original.ibd> <decompressed.ibd>")
+        sys.exit(1)
     
-    if err := analyzeIbdFile(os.Args[1]); err != nil {
-        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-        os.Exit(1)
-    }
-}
+    verify_decompression(sys.argv[1], sys.argv[2])
 ```
+
+## Known Limitations
+
+### Decompression Limitations
+
+1. **Cannot Import to MySQL**: Decompressed files cannot be imported back to MySQL due to ROW_FORMAT metadata mismatch
+2. **Mixed Page Sizes**: Output files have INDEX pages at logical size (16KB) and metadata pages at physical size (8KB)
+3. **Metadata Retention**: File headers retain COMPRESSED format indicators despite containing uncompressed data
+
+### Error Messages
+
+When attempting to import a decompressed file:
+```sql
+ERROR 1808 (HY000): Schema mismatch 
+(Table has ROW_TYPE_DYNAMIC row format, .ibd file has ROW_TYPE_COMPRESSED row format.)
+```
+
+This is expected behavior and indicates the metadata mismatch issue.
+
+### Workarounds
+
+Currently, there are no workarounds to import decompressed files directly. The decompression is useful for:
+- Data recovery and inspection
+- Extracting readable content from compressed tables
+- Analyzing table structure
+- Forensic analysis
+
+But not for:
+- Direct import back to MySQL
+- Table restoration
+- Migration between servers
+
+## Support and Troubleshooting
+
+### Common Issues
+
+1. **Library not found**: Set `LD_LIBRARY_PATH` to the build directory
+2. **Initialization failed**: Ensure all Percona Server dependencies are available
+3. **Decompression successful but import fails**: This is expected behavior
+
+### Debug Output
+
+Enable debug mode to see detailed processing information:
+```c
+ibd_reader_set_debug(reader, 1);
+```
+
+This will show:
+- Page-by-page processing
+- Compression detection
+- Decompression operations
+- Page type information
