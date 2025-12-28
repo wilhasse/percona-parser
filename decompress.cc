@@ -225,11 +225,14 @@ bool should_decompress_page(const unsigned char* page_data,
   // Check if this is a page type that gets zlib-compressed
   uint16_t page_type = mach_read_from_2(page_data + FIL_PAGE_TYPE);
   
-  // Only FIL_PAGE_INDEX (17855) and FIL_PAGE_RTREE pages are compressed
+  // INDEX, RTREE, and SDI pages are compressed in ROW_FORMAT=COMPRESSED tablespaces
   static const uint16_t FIL_PAGE_INDEX = 17855;
   static const uint16_t FIL_PAGE_RTREE = 17854; // Spatial index pages
+  static const uint16_t FIL_PAGE_SDI = 17853;   // Serialized Dictionary Info
   
-  if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_RTREE) {
+  if (page_type == FIL_PAGE_INDEX ||
+      page_type == FIL_PAGE_RTREE ||
+      page_type == FIL_PAGE_SDI) {
     fprintf(stderr, "  [DEBUG] Page should be decompressed (type=%u in compressed tablespace)\n", page_type);
     return true;
   }
@@ -293,7 +296,7 @@ bool decompress_page_inplace(
         } else {
             fprintf(stderr, "  [ERROR] Failed to decompress INDEX page\n");
         }
-    } else {
+    } else if (page_type == FIL_PAGE_RTREE) {
         // FIL_PAGE_RTREE - treat similarly to INDEX
         fprintf(stderr, "  [DEBUG] Attempting RTREE decompression (experimental)\n");
         success = page_zip_decompress_low(&page_zip, aligned_temp, true);
@@ -305,6 +308,16 @@ bool decompress_page_inplace(
             memcpy(out_buf, src_buf, physical_size);
             *actual_size = physical_size;
             success = true; // Don't fail the whole operation
+        }
+    } else {
+        // FIL_PAGE_SDI - treat like INDEX
+        fprintf(stderr, "  [DEBUG] Decompressing SDI page\n");
+        success = page_zip_decompress_low(&page_zip, aligned_temp, true);
+        if (success) {
+            memcpy(out_buf, aligned_temp, logical_size);
+            *actual_size = logical_size;
+        } else {
+            fprintf(stderr, "  [ERROR] Failed to decompress SDI page\n");
         }
     }
 
@@ -386,6 +399,7 @@ static const char* get_page_type_name(uint16_t page_type) {
         case 15: return "FIL_PAGE_ENCRYPTED";
         case 16: return "FIL_PAGE_COMPRESSED_AND_ENCRYPTED";
         case 17: return "FIL_PAGE_ENCRYPTED_RTREE";
+        case 17853: return "FIL_PAGE_SDI";
         case 17855: return "FIL_PAGE_INDEX";
         default: return "UNKNOWN";
     }
