@@ -363,15 +363,34 @@ static bool update_tablespace_header_for_uncompressed(
     return false;
   }
 
-  uint32_t flags = fsp_header_get_flags(page);
-  if (!fsp_flags_is_valid(flags)) {
-    fprintf(stderr, "Invalid FSP flags in page 0: 0x%x\n", flags);
+  const uint32_t old_flags = fsp_header_get_flags(page);
+  if (!fsp_flags_is_valid(old_flags)) {
+    fprintf(stderr, "Invalid FSP flags in page 0: 0x%x\n", old_flags);
     return false;
   }
 
-  flags &= ~FSP_FLAGS_MASK_ZIP_SSIZE;
-  flags &= ~FSP_FLAGS_MASK_PAGE_SSIZE;
-  fsp_header_set_field(page, FSP_SPACE_FLAGS, flags);
+  uint32_t new_flags = old_flags;
+  new_flags &= ~FSP_FLAGS_MASK_ZIP_SSIZE;
+  new_flags &= ~FSP_FLAGS_MASK_PAGE_SSIZE;
+
+  const page_size_t old_page_size(old_flags);
+  const page_size_t new_page_size(new_flags);
+  const ulint old_sdi_offset = fsp_header_get_sdi_offset(old_page_size);
+  const ulint new_sdi_offset = fsp_header_get_sdi_offset(new_page_size);
+
+  if (FSP_FLAGS_HAS_SDI(old_flags) && old_sdi_offset != new_sdi_offset) {
+    const uint32_t sdi_version = mach_read_from_4(page + old_sdi_offset);
+    const uint32_t sdi_root = mach_read_from_4(page + old_sdi_offset + 4);
+
+    if (sdi_version != 0) {
+      mach_write_to_4(page + new_sdi_offset, sdi_version);
+      mach_write_to_4(page + new_sdi_offset + 4, sdi_root);
+      mach_write_to_4(page + old_sdi_offset, 0);
+      mach_write_to_4(page + old_sdi_offset + 4, 0);
+    }
+  }
+
+  fsp_header_set_field(page, FSP_SPACE_FLAGS, new_flags);
   fsp_header_set_field(page, FSP_SPACE_ID, space_id);
 
   *out_space_id = space_id;
