@@ -9,8 +9,8 @@ option(BUILD_SHARED_LIB "Build the shared library" ON)
 option(BUILD_STATIC_LIB "Build the static library" OFF)
 
 # Set paths to percona-server
-set(MYSQL_SOURCE_DIR "/home/cslog/percona-server" CACHE PATH "Path to percona-server source")
-set(MYSQL_BUILD_DIR "/home/cslog/percona-server/build" CACHE PATH "Path to percona-server build")
+set(MYSQL_SOURCE_DIR "/home/cslog/mysql/percona-server" CACHE PATH "Path to percona-server source")
+set(MYSQL_BUILD_DIR "/home/cslog/mysql/percona-server/build" CACHE PATH "Path to percona-server build")
 
 # C++17 standard
 set(CMAKE_CXX_STANDARD 17)
@@ -35,6 +35,7 @@ set(CORE_SOURCES
     my_keyring_lookup.cc
     mysql_crc32c.cc
     keyring_stubs.cc
+    ${MYSQL_SOURCE_DIR}/storage/innobase/ut/crc32.cc
     
     # Plugin/keyring sources from percona-server
     ${MYSQL_SOURCE_DIR}/plugin/keyring/buffered_file_io.cc

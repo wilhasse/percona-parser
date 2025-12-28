@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <string.h>
 #include <limits>
+#include <memory>
 
 // MySQL/Percona headers
 #include "my_dbug.h"
@@ -42,6 +43,7 @@
 // InnoDB headers needed for decompress, page size, etc.
 #include "fil0fil.h"
 #include "fsp0fsp.h"
+#include "fsp0types.h"
 #include "mach0data.h"
 #include "page0page.h"
 #include "page0size.h"
@@ -310,6 +312,59 @@ bool decompress_page_inplace(
     return success;
 }
 
+static uint32_t calc_page_crc32(const unsigned char* page, size_t page_size) {
+  const uint32_t c1 = ut_crc32(page + FIL_PAGE_OFFSET,
+                               FIL_PAGE_FILE_FLUSH_LSN - FIL_PAGE_OFFSET);
+  const uint32_t c2 = ut_crc32(page + FIL_PAGE_DATA,
+                               page_size - FIL_PAGE_DATA -
+                                   FIL_PAGE_END_LSN_OLD_CHKSUM);
+  return (c1 ^ c2);
+}
+
+static void stamp_page_lsn_and_crc32(unsigned char* page,
+                                     size_t page_size,
+                                     uint64_t lsn) {
+  mach_write_to_8(page + FIL_PAGE_LSN, lsn);
+  mach_write_to_8(page + page_size - FIL_PAGE_END_LSN_OLD_CHKSUM, lsn);
+
+  const uint32_t checksum = calc_page_crc32(page, page_size);
+  mach_write_to_4(page + FIL_PAGE_SPACE_OR_CHKSUM, checksum);
+  mach_write_to_4(page + page_size - FIL_PAGE_END_LSN_OLD_CHKSUM, checksum);
+}
+
+static bool update_tablespace_header_for_uncompressed(
+    unsigned char* page,
+    size_t page_size,
+    space_id_t* out_space_id) {
+  if (page_size != UNIV_PAGE_SIZE_ORIG) {
+    fprintf(stderr,
+            "Unsupported logical page size %zu (only 16KB supported for "
+            "rebuild).\n",
+            page_size);
+    return false;
+  }
+
+  const space_id_t space_id = fsp_header_get_field(page, FSP_SPACE_ID);
+  if (space_id == 0 || space_id == SPACE_UNKNOWN) {
+    fprintf(stderr, "Invalid space id in page 0 header: %u\n", space_id);
+    return false;
+  }
+
+  uint32_t flags = fsp_header_get_flags(page);
+  if (!fsp_flags_is_valid(flags)) {
+    fprintf(stderr, "Invalid FSP flags in page 0: 0x%x\n", flags);
+    return false;
+  }
+
+  flags &= ~FSP_FLAGS_MASK_ZIP_SSIZE;
+  flags &= ~FSP_FLAGS_MASK_PAGE_SSIZE;
+  fsp_header_set_field(page, FSP_SPACE_FLAGS, flags);
+  fsp_header_set_field(page, FSP_SPACE_ID, space_id);
+
+  *out_space_id = space_id;
+  return true;
+}
+
 // ----------------------------------------------------------------
 // Helper to get page type name for debugging
 // ----------------------------------------------------------------
@@ -509,4 +564,119 @@ bool decompress_ibd(File in_fd, File out_fd)
 
   free(page_buf);
   return pages_failed == 0;
+}
+
+// ----------------------------------------------------------------
+// Experimental: rebuild compressed tablespace into 16KB pages
+// ----------------------------------------------------------------
+bool rebuild_uncompressed_ibd(File in_fd, File out_fd)
+{
+  MY_STAT stat_info;
+  if (my_fstat(in_fd, &stat_info) != 0) {
+    fprintf(stderr, "Cannot fstat() input file.\n");
+    return false;
+  }
+
+  page_size_t pg_sz(0, 0, false);
+  if (!determine_page_size(in_fd, pg_sz)) {
+    fprintf(stderr, "Could not determine page size.\n");
+    return false;
+  }
+
+  const size_t physical_size = pg_sz.physical();
+  const size_t logical_size = pg_sz.logical();
+
+  if (physical_size >= logical_size) {
+    fprintf(stderr, "Input tablespace does not appear compressed.\n");
+    return false;
+  }
+
+  if (logical_size != UNIV_PAGE_SIZE_ORIG) {
+    fprintf(stderr, "Only 16KB logical pages are supported for rebuild.\n");
+    return false;
+  }
+
+  if (stat_info.st_size % physical_size != 0) {
+    fprintf(stderr, "File size is not a multiple of physical page size.\n");
+    return false;
+  }
+
+  ut_crc32_init();
+
+  const uint64_t total_bytes = stat_info.st_size;
+  const uint64_t num_pages = total_bytes / physical_size;
+
+  std::unique_ptr<unsigned char[]> in_buf(new unsigned char[physical_size]);
+  std::unique_ptr<unsigned char[]> out_buf(new unsigned char[logical_size]);
+
+  space_id_t space_id = SPACE_UNKNOWN;
+
+  fprintf(stderr, "\n========================================\n");
+  fprintf(stderr, "REBUILD STARTING (EXPERIMENTAL)\n");
+  fprintf(stderr, "========================================\n");
+  fprintf(stderr, "Input file size: %llu bytes\n",
+          (unsigned long long)total_bytes);
+  fprintf(stderr, "Physical page size: %zu, Logical page size: %zu\n",
+          physical_size, logical_size);
+  fprintf(stderr, "Total pages: %llu\n", (unsigned long long)num_pages);
+  fprintf(stderr, "========================================\n\n");
+
+  for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
+    if (!seek_page(in_fd, pg_sz, static_cast<page_no_t>(page_no))) {
+      return false;
+    }
+
+    size_t r = my_read(in_fd, in_buf.get(), physical_size, MYF(0));
+    if (r != physical_size) {
+      fprintf(stderr, "Failed to read page %llu.\n",
+              (unsigned long long)page_no);
+      return false;
+    }
+
+    size_t actual_size = 0;
+    if (!decompress_page_inplace(in_buf.get(), physical_size, logical_size,
+                                 out_buf.get(), logical_size, &actual_size)) {
+      fprintf(stderr, "Failed to decompress page %llu.\n",
+              (unsigned long long)page_no);
+      return false;
+    }
+
+    if (page_no == 0) {
+      if (!update_tablespace_header_for_uncompressed(out_buf.get(),
+                                                     logical_size,
+                                                     &space_id)) {
+        return false;
+      }
+    }
+
+    if (space_id == SPACE_UNKNOWN) {
+      fprintf(stderr, "Space id not set after page 0 processing.\n");
+      return false;
+    }
+
+    mach_write_to_4(out_buf.get() + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID, space_id);
+    stamp_page_lsn_and_crc32(out_buf.get(), logical_size, 0);
+
+    size_t w = my_write(out_fd, (uchar*)out_buf.get(), logical_size, MYF(0));
+    if (w != logical_size) {
+      fprintf(stderr, "Failed to write page %llu.\n",
+              (unsigned long long)page_no);
+      return false;
+    }
+
+    if ((page_no + 1) % 100 == 0 || (page_no + 1) == num_pages) {
+      fprintf(stderr, "[PROGRESS] Rebuilt %llu/%llu pages (%.1f%%)\n",
+              (unsigned long long)(page_no + 1),
+              (unsigned long long)num_pages,
+              100.0 * (page_no + 1) / num_pages);
+    }
+  }
+
+  fprintf(stderr, "\n========================================\n");
+  fprintf(stderr, "REBUILD COMPLETE (EXPERIMENTAL)\n");
+  fprintf(stderr, "========================================\n");
+  fprintf(stderr, "Output pages written: %llu\n", (unsigned long long)num_pages);
+  fprintf(stderr, "========================================\n\n");
+
+  return true;
 }

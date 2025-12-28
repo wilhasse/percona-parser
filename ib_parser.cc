@@ -91,12 +91,14 @@ static void usage() {
             << "  1 = Decrypt only\n"
             << "  2 = Decompress only\n"
             << "  3 = Parser only\n"
-            << "  4 = Decrypt then Decompress in a single pass\n\n"
+            << "  4 = Decrypt then Decompress in a single pass\n"
+            << "  5 = Rebuild to uncompressed (experimental)\n\n"
             << "Examples:\n"
             << "  ib_parser 1 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 2 <in_file.ibd> <out_file>\n"
             << "  ib_parser 3 <in_file.ibd> <table_def.json>\n"
             << "  ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
+            << "  ib_parser 5 <in_file.ibd> <out_file>\n"
             << std::endl;
 }
 
@@ -198,6 +200,43 @@ static int do_decompress_main(int argc, char** argv)
   }
 
   bool ok = decompress_ibd(in_fd, out_fd); 
+  my_close(in_fd, MYF(0));
+  my_close(out_fd, MYF(0));
+  return ok ? 0 : 1;
+}
+
+/**
+ * (E) The "rebuild to uncompressed" routine (experimental).
+ *     Produces 16KB pages with CRC32 checksums.
+ */
+static int do_rebuild_uncompressed_main(int argc, char** argv)
+{
+  if (argc < 3) {
+    std::cerr << "Usage for mode=5 (rebuild-uncompressed):\n"
+              << "  ib_parser 5 <in_file> <out_file>\n";
+    return 1;
+  }
+
+  MY_INIT(argv[0]);
+  DBUG_TRACE;
+  DBUG_PROCESS(argv[0]);
+
+  const char* in_file  = argv[1];
+  const char* out_file = argv[2];
+
+  File in_fd = my_open(in_file, O_RDONLY, MYF(0));
+  if (in_fd < 0) {
+    fprintf(stderr, "Cannot open input '%s'.\n", in_file);
+    return 1;
+  }
+  File out_fd = my_open(out_file, O_CREAT | O_WRONLY | O_TRUNC, MYF(0));
+  if (out_fd < 0) {
+    fprintf(stderr, "Cannot open/create output '%s'.\n", out_file);
+    my_close(in_fd, MYF(0));
+    return 1;
+  }
+
+  bool ok = rebuild_uncompressed_ibd(in_fd, out_fd);
   my_close(in_fd, MYF(0));
   my_close(out_fd, MYF(0));
   return ok ? 0 : 1;
@@ -528,6 +567,8 @@ int main(int argc, char** argv)
       return do_parse_main(argc - 1, &argv[1]);
     case 4:  // decrypt + decompress
       return do_decrypt_then_decompress_main(argc - 1, &argv[1]);
+    case 5:  // rebuild to uncompressed
+      return do_rebuild_uncompressed_main(argc - 1, &argv[1]);
     default:
       std::cerr << "Error: invalid mode '" << mode << "'\n";
       usage();
