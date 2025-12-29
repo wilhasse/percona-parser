@@ -167,6 +167,19 @@ else
 fi
 rm -f "$TEMP_OUT"
 
+# Test 13: External LOB decode (LONGTEXT/LONGBLOB)
+echo "Test 13: External LOB decode (LONGTEXT/LONGBLOB)"
+if [[ -f "$SCRIPT_DIR/lob_test.ibd" && -f "$SCRIPT_DIR/lob_test_sdi.json" ]]; then
+    LOB_LEN=$(${PARSER} 3 "$SCRIPT_DIR/lob_test.ibd" "$SCRIPT_DIR/lob_test_sdi.json" --format=jsonl 2>&1 | grep -E '^\{' | head -1 | jq -r '.big_text | length' 2>/dev/null || echo "0")
+    if [[ "$LOB_LEN" -eq 104000 ]]; then
+        log_pass "External LOB decoded: $LOB_LEN bytes"
+    else
+        log_fail "External LOB decode failed: got $LOB_LEN bytes (expected 104000)"
+    fi
+else
+    log_info "LOB test files not found, skipping"
+fi
+
 echo ""
 echo "================================"
 echo "  Results: $TESTS_PASSED passed, $TESTS_FAILED failed"
