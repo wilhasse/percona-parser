@@ -17,12 +17,14 @@
 #include <vector>
 #include <algorithm>
 #include <unistd.h>
+#include <zlib.h>
 
 // MySQL includes
 #include "fil0fil.h"
 #include "fil0types.h"
 #include "btr0types.h"
 #include "lob0lob.h"
+#include "page/zipdecompress.h"
 #include "tables_dict.h"
 #include "univ.i"
 #include "page0page.h"
@@ -358,6 +360,80 @@ constexpr ulint LOB_FIRST_INDEX_ARRAY_SIZE =
     LOB_FIRST_INDEX_COUNT * LOB_INDEX_ENTRY_SIZE;
 constexpr ulint LOB_FIRST_DATA_BEGIN = LOB_FIRST_DATA + LOB_FIRST_INDEX_ARRAY_SIZE;
 
+constexpr ulint ZLOB_FIRST_OFFSET_VERSION = FIL_PAGE_DATA;
+constexpr ulint ZLOB_FIRST_OFFSET_FLAGS = ZLOB_FIRST_OFFSET_VERSION + 1;
+constexpr ulint ZLOB_FIRST_OFFSET_LOB_VERSION = ZLOB_FIRST_OFFSET_FLAGS + 1;
+constexpr ulint ZLOB_FIRST_OFFSET_LAST_TRX_ID = ZLOB_FIRST_OFFSET_LOB_VERSION + 4;
+constexpr ulint ZLOB_FIRST_OFFSET_LAST_UNDO_NO = ZLOB_FIRST_OFFSET_LAST_TRX_ID + 6;
+constexpr ulint ZLOB_FIRST_OFFSET_DATA_LEN = ZLOB_FIRST_OFFSET_LAST_UNDO_NO + 4;
+constexpr ulint ZLOB_FIRST_OFFSET_TRX_ID = ZLOB_FIRST_OFFSET_DATA_LEN + 4;
+constexpr ulint ZLOB_FIRST_OFFSET_INDEX_PAGE_NO = ZLOB_FIRST_OFFSET_TRX_ID + 6;
+constexpr ulint ZLOB_FIRST_OFFSET_FRAG_NODES_PAGE_NO =
+    ZLOB_FIRST_OFFSET_INDEX_PAGE_NO + 4;
+constexpr ulint ZLOB_FIRST_OFFSET_FREE_LIST =
+    ZLOB_FIRST_OFFSET_FRAG_NODES_PAGE_NO + 4;
+constexpr ulint ZLOB_FIRST_OFFSET_INDEX_LIST =
+    ZLOB_FIRST_OFFSET_FREE_LIST + LOB_FLST_BASE_NODE_SIZE;
+constexpr ulint ZLOB_FIRST_OFFSET_FREE_FRAG_LIST =
+    ZLOB_FIRST_OFFSET_INDEX_LIST + LOB_FLST_BASE_NODE_SIZE;
+constexpr ulint ZLOB_FIRST_OFFSET_FRAG_LIST =
+    ZLOB_FIRST_OFFSET_FREE_FRAG_LIST + LOB_FLST_BASE_NODE_SIZE;
+constexpr ulint ZLOB_FIRST_OFFSET_INDEX_BEGIN =
+    ZLOB_FIRST_OFFSET_FRAG_LIST + LOB_FLST_BASE_NODE_SIZE;
+
+constexpr ulint ZLOB_DATA_OFFSET_VERSION = FIL_PAGE_DATA;
+constexpr ulint ZLOB_DATA_OFFSET_DATA_LEN = ZLOB_DATA_OFFSET_VERSION + 1;
+constexpr ulint ZLOB_DATA_OFFSET_TRX_ID = ZLOB_DATA_OFFSET_DATA_LEN + 4;
+constexpr ulint ZLOB_DATA_OFFSET_DATA_BEGIN = ZLOB_DATA_OFFSET_TRX_ID + 6;
+
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_PREV = 0;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_NEXT = FIL_ADDR_SIZE;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_VERSIONS =
+    ZLOB_INDEX_ENTRY_OFFSET_NEXT + FIL_ADDR_SIZE;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_TRXID =
+    ZLOB_INDEX_ENTRY_OFFSET_VERSIONS + LOB_FLST_BASE_NODE_SIZE;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_TRXID_MODIFIER =
+    ZLOB_INDEX_ENTRY_OFFSET_TRXID + 6;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO =
+    ZLOB_INDEX_ENTRY_OFFSET_TRXID_MODIFIER + 6;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO_MODIFIER =
+    ZLOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO + 4;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_Z_PAGE_NO =
+    ZLOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO_MODIFIER + 4;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_Z_FRAG_ID =
+    ZLOB_INDEX_ENTRY_OFFSET_Z_PAGE_NO + 4;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_DATA_LEN =
+    ZLOB_INDEX_ENTRY_OFFSET_Z_FRAG_ID + 2;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_ZDATA_LEN =
+    ZLOB_INDEX_ENTRY_OFFSET_DATA_LEN + 4;
+constexpr ulint ZLOB_INDEX_ENTRY_OFFSET_LOB_VERSION =
+    ZLOB_INDEX_ENTRY_OFFSET_ZDATA_LEN + 4;
+constexpr ulint ZLOB_INDEX_ENTRY_SIZE =
+    ZLOB_INDEX_ENTRY_OFFSET_LOB_VERSION + 4;
+
+constexpr ulint ZLOB_FRAG_ENTRY_OFFSET_PREV = 0;
+constexpr ulint ZLOB_FRAG_ENTRY_OFFSET_NEXT = ZLOB_FRAG_ENTRY_OFFSET_PREV + FIL_ADDR_SIZE;
+constexpr ulint ZLOB_FRAG_ENTRY_OFFSET_PAGE_NO = ZLOB_FRAG_ENTRY_OFFSET_NEXT + FIL_ADDR_SIZE;
+constexpr ulint ZLOB_FRAG_ENTRY_OFFSET_N_FRAGS = ZLOB_FRAG_ENTRY_OFFSET_PAGE_NO + 4;
+constexpr ulint ZLOB_FRAG_ENTRY_OFFSET_USED_LEN = ZLOB_FRAG_ENTRY_OFFSET_N_FRAGS + 2;
+constexpr ulint ZLOB_FRAG_ENTRY_OFFSET_TOTAL_FREE_LEN =
+    ZLOB_FRAG_ENTRY_OFFSET_USED_LEN + 2;
+constexpr ulint ZLOB_FRAG_ENTRY_OFFSET_BIG_FREE_LEN =
+    ZLOB_FRAG_ENTRY_OFFSET_TOTAL_FREE_LEN + 2;
+constexpr ulint ZLOB_FRAG_ENTRY_SIZE = ZLOB_FRAG_ENTRY_OFFSET_BIG_FREE_LEN + 2;
+
+constexpr ulint ZLOB_FRAG_PAGE_OFFSET_PAGE_DIR_ENTRY_COUNT = FIL_PAGE_DATA_END + 2;
+constexpr ulint ZLOB_FRAG_PAGE_OFFSET_PAGE_DIR_ENTRY_FIRST =
+    ZLOB_FRAG_PAGE_OFFSET_PAGE_DIR_ENTRY_COUNT + 2;
+constexpr ulint ZLOB_FRAG_PAGE_DIR_ENTRY_SIZE = 2;
+
+constexpr ulint ZLOB_PLIST_NODE_SIZE = 4;
+constexpr ulint ZLOB_FRAG_NODE_OFFSET_LEN = ZLOB_PLIST_NODE_SIZE;
+constexpr ulint ZLOB_FRAG_NODE_OFFSET_FRAG_ID = ZLOB_FRAG_NODE_OFFSET_LEN + 2;
+constexpr ulint ZLOB_FRAG_NODE_OFFSET_DATA = ZLOB_FRAG_NODE_OFFSET_FRAG_ID + 2;
+constexpr ulint ZLOB_FRAG_NODE_HEADER_SIZE = ZLOB_FRAG_NODE_OFFSET_DATA;
+constexpr uint16_t ZLOB_FRAG_ID_NULL = 0xFFFF;
+
 struct LobRef {
   space_id_t space_id = 0;
   page_no_t page_no = FIL_NULL;
@@ -367,6 +443,16 @@ struct LobRef {
   bool being_modified = false;
 };
 
+struct ZlobIndexEntry {
+  fil_addr_t next;
+  fil_addr_t versions_first;
+  page_no_t z_page_no = FIL_NULL;
+  uint16_t z_frag_id = ZLOB_FRAG_ID_NULL;
+  uint32_t data_len = 0;
+  uint32_t zdata_len = 0;
+  uint32_t lob_version = 0;
+};
+
 static fil_addr_t read_fil_addr(const unsigned char* ptr) {
   fil_addr_t addr;
   addr.page = mach_read_from_4(ptr + FIL_ADDR_PAGE);
@@ -374,16 +460,142 @@ static fil_addr_t read_fil_addr(const unsigned char* ptr) {
   return addr;
 }
 
+static uint32_t page_size_to_ssize_local(size_t page_size) {
+  uint32_t ssize;
+  for (ssize = UNIV_ZIP_SIZE_SHIFT_MIN;
+       static_cast<uint32_t>(1U << ssize) < page_size; ssize++) {
+  }
+  return (ssize - UNIV_ZIP_SIZE_SHIFT_MIN + 1);
+}
+
+static unsigned char* align_ptr(unsigned char* ptr, size_t align) {
+  const uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
+  const uintptr_t aligned = (p + align - 1) & ~(align - 1);
+  return reinterpret_cast<unsigned char*>(aligned);
+}
+
+static bool should_decompress_lob_page(uint16_t page_type) {
+  return page_type == FIL_PAGE_TYPE_ZLOB_FIRST ||
+         page_type == FIL_PAGE_TYPE_ZLOB_DATA ||
+         page_type == FIL_PAGE_TYPE_ZLOB_INDEX ||
+         page_type == FIL_PAGE_TYPE_ZLOB_FRAG ||
+         page_type == FIL_PAGE_TYPE_ZLOB_FRAG_ENTRY;
+}
+
+static bool decompress_zip_page(const unsigned char* src,
+                                std::vector<unsigned char>& buf) {
+  const size_t logical = g_lob_ctx.logical_page_size;
+  if (logical == 0 || buf.size() < logical) {
+    buf.resize(logical);
+  }
+
+  std::vector<unsigned char> temp(logical * 2);
+  unsigned char* aligned = align_ptr(temp.data(), logical);
+  std::memset(aligned, 0, logical);
+
+  page_zip_des_t page_zip;
+  std::memset(&page_zip, 0, sizeof(page_zip));
+  page_zip.data = reinterpret_cast<page_zip_t*>(const_cast<unsigned char*>(src));
+  page_zip.ssize = page_size_to_ssize_local(g_lob_ctx.physical_page_size);
+
+  if (!page_zip_decompress_low(&page_zip, aligned, true)) {
+    return false;
+  }
+  std::memcpy(buf.data(), aligned, logical);
+  return true;
+}
+
+static bool read_tablespace_page_raw(page_no_t page_no,
+                                     std::vector<unsigned char>& buf) {
+  if (g_lob_ctx.fd < 0 || g_lob_ctx.physical_page_size == 0) {
+    return false;
+  }
+  const size_t physical = g_lob_ctx.physical_page_size;
+  if (buf.size() < physical) {
+    buf.resize(physical);
+  }
+  const off_t offset =
+      static_cast<off_t>(page_no) * static_cast<off_t>(physical);
+  const ssize_t rd = pread(g_lob_ctx.fd, buf.data(), physical, offset);
+  return rd == static_cast<ssize_t>(physical);
+}
+
+static ulint zlob_first_index_entries(size_t physical_size) {
+  switch (physical_size) {
+    case 16384:
+      return 100;
+    case 8192:
+      return 80;
+    case 4096:
+      return 40;
+    case 2048:
+      return 20;
+    case 1024:
+      return 5;
+    default:
+      return 0;
+  }
+}
+
+static ulint zlob_first_frag_entries(size_t physical_size) {
+  switch (physical_size) {
+    case 16384:
+      return 200;
+    case 8192:
+      return 100;
+    case 4096:
+      return 40;
+    case 2048:
+      return 20;
+    case 1024:
+      return 5;
+    default:
+      return 0;
+  }
+}
+
+static ulint zlob_first_data_begin(size_t physical_size) {
+  const ulint index_entries = zlob_first_index_entries(physical_size);
+  const ulint frag_entries = zlob_first_frag_entries(physical_size);
+  return ZLOB_FIRST_OFFSET_INDEX_BEGIN +
+         index_entries * ZLOB_INDEX_ENTRY_SIZE +
+         frag_entries * ZLOB_FRAG_ENTRY_SIZE;
+}
+
 static bool read_tablespace_page(page_no_t page_no,
                                  std::vector<unsigned char>& buf) {
   if (g_lob_ctx.fd < 0 || g_lob_ctx.physical_page_size == 0) {
     return false;
   }
+  const size_t physical = g_lob_ctx.physical_page_size;
+  const size_t logical = g_lob_ctx.tablespace_compressed
+                             ? g_lob_ctx.logical_page_size
+                             : g_lob_ctx.physical_page_size;
+
+  if (buf.size() < logical) {
+    buf.resize(logical);
+  }
+
   const off_t offset =
-      static_cast<off_t>(page_no) * static_cast<off_t>(g_lob_ctx.physical_page_size);
-  const ssize_t rd = pread(g_lob_ctx.fd, buf.data(),
-                           g_lob_ctx.physical_page_size, offset);
-  return rd == static_cast<ssize_t>(g_lob_ctx.physical_page_size);
+      static_cast<off_t>(page_no) * static_cast<off_t>(physical);
+
+  if (!g_lob_ctx.tablespace_compressed) {
+    const ssize_t rd = pread(g_lob_ctx.fd, buf.data(), physical, offset);
+    return rd == static_cast<ssize_t>(physical);
+  }
+
+  std::vector<unsigned char> phys_buf(physical);
+  if (!read_tablespace_page_raw(page_no, phys_buf)) {
+    return false;
+  }
+
+  const uint16_t page_type = mach_read_from_2(phys_buf.data() + FIL_PAGE_TYPE);
+  if (!should_decompress_lob_page(page_type)) {
+    std::memcpy(buf.data(), phys_buf.data(), physical);
+    return true;
+  }
+
+  return decompress_zip_page(phys_buf.data(), buf);
 }
 
 static size_t clamp_page_copy(size_t page_size, size_t start, size_t want) {
@@ -549,6 +761,343 @@ static size_t read_lob_new_format(const LobRef& ref,
   return total;
 }
 
+static bool read_zlob_index_entry(const unsigned char* node,
+                                  ZlobIndexEntry& entry) {
+  entry.next = read_fil_addr(node + ZLOB_INDEX_ENTRY_OFFSET_NEXT);
+  entry.versions_first =
+      read_fil_addr(node + ZLOB_INDEX_ENTRY_OFFSET_VERSIONS + 4);
+  entry.z_page_no = mach_read_from_4(node + ZLOB_INDEX_ENTRY_OFFSET_Z_PAGE_NO);
+  entry.z_frag_id = mach_read_from_2(node + ZLOB_INDEX_ENTRY_OFFSET_Z_FRAG_ID);
+  entry.data_len = mach_read_from_4(node + ZLOB_INDEX_ENTRY_OFFSET_DATA_LEN);
+  entry.zdata_len = mach_read_from_4(node + ZLOB_INDEX_ENTRY_OFFSET_ZDATA_LEN);
+  entry.lob_version = mach_read_from_4(node + ZLOB_INDEX_ENTRY_OFFSET_LOB_VERSION);
+  return true;
+}
+
+static bool read_zlob_frag_payload(const unsigned char* page,
+                                   size_t physical_size,
+                                   uint16_t frag_id,
+                                   const unsigned char** data,
+                                   size_t* data_len) {
+  if (frag_id == ZLOB_FRAG_ID_NULL) {
+    return false;
+  }
+  if (physical_size < ZLOB_FRAG_PAGE_OFFSET_PAGE_DIR_ENTRY_FIRST) {
+    return false;
+  }
+  const unsigned char* count_ptr =
+      page + physical_size - ZLOB_FRAG_PAGE_OFFSET_PAGE_DIR_ENTRY_COUNT;
+  const uint16_t n_entries = mach_read_from_2(count_ptr);
+  if (frag_id >= n_entries) {
+    return false;
+  }
+  const unsigned char* first =
+      page + physical_size - ZLOB_FRAG_PAGE_OFFSET_PAGE_DIR_ENTRY_FIRST;
+  const unsigned char* entry_ptr =
+      first - frag_id * ZLOB_FRAG_PAGE_DIR_ENTRY_SIZE;
+  const uint16_t offset = mach_read_from_2(entry_ptr);
+  if (offset + ZLOB_FRAG_NODE_HEADER_SIZE > physical_size) {
+    return false;
+  }
+  const unsigned char* node = page + offset;
+  const uint16_t total_len = mach_read_from_2(node + ZLOB_FRAG_NODE_OFFSET_LEN);
+  if (total_len < ZLOB_FRAG_NODE_HEADER_SIZE) {
+    return false;
+  }
+  size_t payload = static_cast<size_t>(total_len - ZLOB_FRAG_NODE_HEADER_SIZE);
+  payload = clamp_page_copy(physical_size,
+                            offset + ZLOB_FRAG_NODE_OFFSET_DATA,
+                            payload);
+  if (payload == 0) {
+    return false;
+  }
+  *data = node + ZLOB_FRAG_NODE_OFFSET_DATA;
+  *data_len = payload;
+  return true;
+}
+
+static bool read_zlob_stream(const ZlobIndexEntry& entry,
+                             unsigned char* buf,
+                             size_t buf_size) {
+  if (buf_size == 0 || entry.z_page_no == FIL_NULL) {
+    return false;
+  }
+
+  size_t remaining = buf_size;
+  unsigned char* ptr = buf;
+  page_no_t page_no = entry.z_page_no;
+  size_t steps = 0;
+  const size_t max_steps = 100000;
+
+  std::vector<unsigned char> page_buf(g_lob_ctx.logical_page_size);
+
+  while (remaining > 0 && page_no != FIL_NULL && steps++ < max_steps) {
+    if (!read_tablespace_page(page_no, page_buf)) {
+      return false;
+    }
+    const uint16_t page_type =
+        mach_read_from_2(page_buf.data() + FIL_PAGE_TYPE);
+
+    const unsigned char* data = nullptr;
+    size_t data_len = 0;
+
+    if (page_type == FIL_PAGE_TYPE_ZLOB_FIRST) {
+      const uint32_t len = mach_read_from_4(page_buf.data() +
+                                            ZLOB_FIRST_OFFSET_DATA_LEN);
+      const ulint begin = zlob_first_data_begin(g_lob_ctx.physical_page_size);
+      data_len = clamp_page_copy(g_lob_ctx.physical_page_size, begin, len);
+      data = page_buf.data() + begin;
+    } else if (page_type == FIL_PAGE_TYPE_ZLOB_DATA) {
+      const uint32_t len = mach_read_from_4(page_buf.data() +
+                                            ZLOB_DATA_OFFSET_DATA_LEN);
+      data_len = clamp_page_copy(g_lob_ctx.physical_page_size,
+                                 ZLOB_DATA_OFFSET_DATA_BEGIN,
+                                 len);
+      data = page_buf.data() + ZLOB_DATA_OFFSET_DATA_BEGIN;
+    } else if (page_type == FIL_PAGE_TYPE_ZLOB_FRAG) {
+      if (!read_zlob_frag_payload(page_buf.data(),
+                                  g_lob_ctx.physical_page_size,
+                                  entry.z_frag_id,
+                                  &data,
+                                  &data_len)) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+
+    if (data_len == 0) {
+      return false;
+    }
+
+    const size_t copy_len = (remaining < data_len) ? remaining : data_len;
+    std::memcpy(ptr, data, copy_len);
+    ptr += copy_len;
+    remaining -= copy_len;
+    page_no = mach_read_from_4(page_buf.data() + FIL_PAGE_NEXT);
+  }
+
+  return remaining == 0;
+}
+
+static size_t read_zlob_chunk(const ZlobIndexEntry& entry,
+                              size_t want,
+                              std::string& out) {
+  if (entry.z_page_no == FIL_NULL || entry.data_len == 0 || entry.zdata_len == 0) {
+    return 0;
+  }
+
+  std::vector<unsigned char> zbuf(entry.zdata_len);
+  if (!read_zlob_stream(entry, zbuf.data(), zbuf.size())) {
+    return 0;
+  }
+
+  z_stream strm;
+  std::memset(&strm, 0, sizeof(strm));
+  if (inflateInit(&strm) != Z_OK) {
+    return 0;
+  }
+
+  strm.avail_in = static_cast<uInt>(zbuf.size());
+  strm.next_in = zbuf.data();
+
+  size_t copied = 0;
+  const size_t full_len = entry.data_len;
+  const size_t target = (want < full_len) ? want : full_len;
+
+  if (target == full_len) {
+    const size_t out_pos = out.size();
+    out.resize(out_pos + full_len);
+    strm.avail_out = static_cast<uInt>(full_len);
+    strm.next_out = reinterpret_cast<unsigned char*>(&out[out_pos]);
+    const int ret = inflate(&strm, Z_FINISH);
+    if (ret != Z_STREAM_END) {
+      inflateEnd(&strm);
+      out.resize(out_pos);
+      return 0;
+    }
+    copied = static_cast<size_t>(strm.total_out);
+    out.resize(out_pos + copied);
+  } else {
+    std::vector<unsigned char> tmp(full_len);
+    strm.avail_out = static_cast<uInt>(full_len);
+    strm.next_out = tmp.data();
+    const int ret = inflate(&strm, Z_FINISH);
+    if (ret != Z_STREAM_END) {
+      inflateEnd(&strm);
+      return 0;
+    }
+    const size_t produced = static_cast<size_t>(strm.total_out);
+    copied = (target < produced) ? target : produced;
+    out.append(reinterpret_cast<const char*>(tmp.data()), copied);
+  }
+
+  inflateEnd(&strm);
+  return copied;
+}
+
+static bool read_zlob_visible_entry(const ZlobIndexEntry& current,
+                                    const unsigned char* node,
+                                    uint32_t ref_version,
+                                    ZlobIndexEntry& out) {
+  if (current.lob_version <= ref_version) {
+    out = current;
+    return true;
+  }
+
+  fil_addr_t addr =
+      read_fil_addr(node + ZLOB_INDEX_ENTRY_OFFSET_VERSIONS + 4);
+  size_t steps = 0;
+  const size_t max_steps = 100000;
+  std::vector<unsigned char> page_buf(g_lob_ctx.logical_page_size);
+
+  while (!addr.is_null() && steps++ < max_steps) {
+    if (!read_tablespace_page(addr.page, page_buf)) {
+      break;
+    }
+    if (addr.boffset + ZLOB_INDEX_ENTRY_SIZE > g_lob_ctx.physical_page_size) {
+      break;
+    }
+    const unsigned char* ver_node = page_buf.data() + addr.boffset;
+    ZlobIndexEntry entry{};
+    read_zlob_index_entry(ver_node, entry);
+    if (entry.lob_version <= ref_version) {
+      out = entry;
+      return true;
+    }
+    addr = entry.next;
+  }
+
+  out = current;
+  return true;
+}
+
+static size_t read_zlob_new_format(const LobRef& ref,
+                                   size_t want,
+                                   std::string& out) {
+  if (want == 0 || ref.page_no == FIL_NULL) {
+    return 0;
+  }
+
+  std::vector<unsigned char> first_page(g_lob_ctx.logical_page_size);
+  if (!read_tablespace_page(ref.page_no, first_page)) {
+    return 0;
+  }
+  const uint16_t page_type = mach_read_from_2(first_page.data() + FIL_PAGE_TYPE);
+  if (page_type != FIL_PAGE_TYPE_ZLOB_FIRST) {
+    return 0;
+  }
+
+  const unsigned char* base = first_page.data() + ZLOB_FIRST_OFFSET_INDEX_LIST;
+  fil_addr_t addr = read_fil_addr(base + 4);
+  size_t remaining = want;
+  size_t total = 0;
+  size_t steps = 0;
+  const size_t max_steps = 100000;
+
+  std::vector<unsigned char> index_buf(g_lob_ctx.logical_page_size);
+
+  while (!addr.is_null() && remaining > 0 && steps++ < max_steps) {
+    if (!read_tablespace_page(addr.page, index_buf)) {
+      break;
+    }
+    if (addr.boffset + ZLOB_INDEX_ENTRY_SIZE > g_lob_ctx.physical_page_size) {
+      break;
+    }
+    const unsigned char* node = index_buf.data() + addr.boffset;
+
+    ZlobIndexEntry current{};
+    read_zlob_index_entry(node, current);
+
+    ZlobIndexEntry entry{};
+    if (!read_zlob_visible_entry(current, node, ref.version, entry)) {
+      break;
+    }
+
+    const size_t copied = read_zlob_chunk(entry, remaining, out);
+    if (copied == 0) {
+      break;
+    }
+
+    total += copied;
+    remaining -= copied;
+    addr = current.next;
+  }
+
+  return total;
+}
+
+static size_t read_zblob_external(const LobRef& ref,
+                                  size_t want,
+                                  std::string& out) {
+  if (want == 0 || ref.page_no == FIL_NULL) {
+    return 0;
+  }
+
+  std::vector<unsigned char> page_buf(g_lob_ctx.physical_page_size);
+  page_no_t page_no = ref.page_no;
+  ulint offset = ref.offset;
+  size_t steps = 0;
+  const size_t max_steps = 100000;
+
+  const size_t out_pos = out.size();
+  out.resize(out_pos + want);
+  unsigned char* out_ptr = reinterpret_cast<unsigned char*>(&out[out_pos]);
+
+  z_stream strm;
+  std::memset(&strm, 0, sizeof(strm));
+  if (inflateInit(&strm) != Z_OK) {
+    out.resize(out_pos);
+    return 0;
+  }
+  strm.next_out = out_ptr;
+  strm.avail_out = static_cast<uInt>(want);
+
+  while (page_no != FIL_NULL && strm.avail_out > 0 && steps++ < max_steps) {
+    if (!read_tablespace_page_raw(page_no, page_buf)) {
+      break;
+    }
+    const uint16_t page_type = mach_read_from_2(page_buf.data() + FIL_PAGE_TYPE);
+    if (page_type != FIL_PAGE_TYPE_ZBLOB &&
+        page_type != FIL_PAGE_TYPE_ZBLOB2 &&
+        page_type != FIL_PAGE_SDI_ZBLOB) {
+      break;
+    }
+
+    page_no = mach_read_from_4(page_buf.data() + FIL_PAGE_NEXT);
+
+    ulint data_offset = offset;
+    if (data_offset == FIL_PAGE_NEXT) {
+      data_offset = FIL_PAGE_DATA;
+    } else {
+      data_offset += 4;
+    }
+
+    if (data_offset >= g_lob_ctx.physical_page_size) {
+      break;
+    }
+
+    strm.next_in = page_buf.data() + data_offset;
+    strm.avail_in =
+        static_cast<uInt>(g_lob_ctx.physical_page_size - data_offset);
+
+    const int ret = inflate(&strm, Z_NO_FLUSH);
+    if (ret == Z_STREAM_END) {
+      break;
+    }
+    if (ret != Z_OK && ret != Z_BUF_ERROR) {
+      break;
+    }
+
+    offset = FIL_PAGE_NEXT;
+  }
+
+  const size_t produced = want - strm.avail_out;
+  inflateEnd(&strm);
+  out.resize(out_pos + produced);
+  return produced;
+}
+
 static unsigned int max_decimals_from_len(ulint len, ulint base_len) {
   if (len <= base_len) {
     return 0;
@@ -601,10 +1150,10 @@ static bool format_innodb_time(const unsigned char* ptr, ulint len,
 static size_t read_lob_external(const LobRef& ref,
                                 size_t want,
                                 std::string& out) {
-  if (g_lob_ctx.fd < 0 || g_lob_ctx.tablespace_compressed) {
+  if (g_lob_ctx.fd < 0) {
     return 0;
   }
-  std::vector<unsigned char> page_buf(g_lob_ctx.physical_page_size);
+  std::vector<unsigned char> page_buf(g_lob_ctx.logical_page_size);
   if (!read_tablespace_page(ref.page_no, page_buf)) {
     return 0;
   }
@@ -614,6 +1163,14 @@ static size_t read_lob_external(const LobRef& ref,
   }
   if (page_type == FIL_PAGE_TYPE_LOB_FIRST) {
     return read_lob_new_format(ref, want, out);
+  }
+  if (page_type == FIL_PAGE_TYPE_ZLOB_FIRST) {
+    return read_zlob_new_format(ref, want, out);
+  }
+  if (page_type == FIL_PAGE_TYPE_ZBLOB ||
+      page_type == FIL_PAGE_TYPE_ZBLOB2 ||
+      page_type == FIL_PAGE_SDI_ZBLOB) {
+    return read_zblob_external(ref, want, out);
   }
   return 0;
 }
