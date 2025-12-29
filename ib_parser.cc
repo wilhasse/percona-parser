@@ -248,7 +248,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
 {
   if (argc < 3) {
     std::cerr << "Usage for mode=5 (rebuild-uncompressed):\n"
-              << "  ib_parser 5 <in_file> <out_file>\n";
+              << "  ib_parser 5 <in_file> <out_file> [--sdi-json=PATH]\n";
     return 1;
   }
 
@@ -258,6 +258,21 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
 
   const char* in_file  = argv[1];
   const char* out_file = argv[2];
+  const char* sdi_json = nullptr;
+
+  for (int i = 3; i < argc; ++i) {
+    const char* arg = argv[i];
+    if (strncmp(arg, "--sdi-json=", 11) == 0) {
+      sdi_json = arg + 11;
+      continue;
+    }
+    if (strcmp(arg, "--sdi-json") == 0 && i + 1 < argc) {
+      sdi_json = argv[++i];
+      continue;
+    }
+    std::cerr << "Unknown option: " << arg << "\n";
+    return 1;
+  }
 
   File in_fd = my_open(in_file, O_RDONLY, MYF(0));
   if (in_fd < 0) {
@@ -271,7 +286,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
     return 1;
   }
 
-  bool ok = rebuild_uncompressed_ibd(in_fd, out_fd);
+  bool ok = rebuild_uncompressed_ibd(in_fd, out_fd, sdi_json);
   my_close(in_fd, MYF(0));
   my_close(out_fd, MYF(0));
   return ok ? 0 : 1;

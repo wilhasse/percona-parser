@@ -136,6 +136,7 @@ if [ "$JSON_OUTPUT" != "true" ] || [ "$VERBOSE" = "true" ]; then
     echo "6. JSON binary decoding (JSON columns)"
     echo "7. LOB external decoding (LONGTEXT, LONGBLOB)"
     echo "8. ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)"
+    echo "9. SDI rebuild (Mode 5 with --sdi-json)"
     echo ""
     if [ "$VERBOSE" = "true" ]; then
         echo -e "${CYAN}Verbose mode enabled - showing real-time output${NC}"
@@ -265,6 +266,15 @@ fi
 # Test 8: ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "ZLOB_DECODING" "$SCRIPT_DIR/test_zlob_decode.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+[ "$JSON_OUTPUT" != "true" ] && echo ""
+
+# Test 9: SDI rebuild (Mode 5 with --sdi-json)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "SDI_REBUILD" "$SCRIPT_DIR/test_sdi_rebuild.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
     FAILED_TESTS=$((FAILED_TESTS + 1))
