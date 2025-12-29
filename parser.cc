@@ -646,6 +646,41 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
  * If you want the "table-based" field parsing from undrop-for-innodb,
  * you’d bring in structures like table_def_t, rec_offs_* helpers, etc.
  */
+static bool next_compact_rec_offset(const page_t* page,
+                                    ulint rec_offset,
+                                    size_t page_size,
+                                    ulint* next_offset)
+{
+  if (rec_offset < REC_NEXT || rec_offset >= page_size) {
+    return false;
+  }
+
+  const rec_t* rec = reinterpret_cast<const rec_t*>(
+      reinterpret_cast<const unsigned char*>(page) + rec_offset);
+  const unsigned char* rec_bytes =
+      reinterpret_cast<const unsigned char*>(rec);
+  const int16_t delta = static_cast<int16_t>(
+      mach_read_from_2(rec_bytes - REC_NEXT));
+
+  if (delta == 0) {
+    return false;
+  }
+
+  int32_t raw = static_cast<int32_t>(rec_offset) + delta;
+  int32_t mod = raw % static_cast<int32_t>(page_size);
+  if (mod < 0) {
+    mod += static_cast<int32_t>(page_size);
+  }
+
+  if (mod < static_cast<int32_t>(PAGE_NEW_INFIMUM) ||
+      mod >= static_cast<int32_t>(page_size)) {
+    return false;
+  }
+
+  *next_offset = static_cast<ulint>(mod);
+  return true;
+}
+
 void parse_records_on_page(const unsigned char* page,
                            size_t page_size,
                            uint64_t page_no)
@@ -672,68 +707,81 @@ void parse_records_on_page(const unsigned char* page,
     return;
   }
 
-  // 4) infimum / supremum offsets
-  ulint inf_offset = (is_compact) ? PAGE_NEW_INFIMUM : PAGE_OLD_INFIMUM;
-  ulint sup_offset = (is_compact) ? PAGE_NEW_SUPREMUM : PAGE_OLD_SUPREMUM;
+  const bool include_deleted = false;
 
-  // 5) Loop from infimum -> supremum
-  ulint rec_offset = inf_offset;
+  // 4) Loop from infimum -> supremum using COMPACT offsets
+  const ulint inf_offset = PAGE_NEW_INFIMUM;
   ulint n_records  = 0;
+  ulint n_deleted  = 0;
+  ulint n_invalid  = 0;
+  ulint rec_offset = inf_offset;
+  ulint steps = 0;
+  ulint max_steps = static_cast<ulint>(
+      page_size / (REC_N_NEW_EXTRA_BYTES + 1));
+  const ulint n_recs = mach_read_from_2(page + PAGE_HEADER + PAGE_N_RECS);
+  if (max_steps < n_recs + 2) {
+    max_steps = n_recs + 2;
+  }
 
-  while (rec_offset != sup_offset) {
-    // Safety checks
-    if (rec_offset < 2 || rec_offset + 2 > page_size) {
-      // Looks corrupted => break
+  while (steps < max_steps) {
+    const rec_t* rec = reinterpret_cast<const rec_t*>(page + rec_offset);
+    const ulint status = rec_get_status(rec);
+    if (status == REC_STATUS_SUPREMUM) {
       break;
     }
 
-    // Next record pointer is stored differently in COMPACT vs. REDUNDANT
-    ulint next_off;
-    if (is_compact) {
-      next_off = mach_read_from_2(page + rec_offset - 2);
-      next_off = rec_offset + next_off;
-    } else {
-      // Redundant
-      next_off = mach_read_from_2(page + rec_offset - 2);
-    }
+    if (status == REC_STATUS_ORDINARY) {
+      const bool deleted = rec_get_deleted_flag(rec, true);
+      if (!deleted || include_deleted) {
+        n_records++;
+        std::cout << "  - Found record at offset "
+                  << rec_offset << " (page " << page_no << ")\n";
 
-    // skip infimum
-    if (rec_offset != inf_offset) {
-      n_records++;
-      std::cout << "  - Found record at offset " 
-                << rec_offset << " (page " << page_no << ")\n";
+        // (A) We'll do the undrop approach: check_for_a_record() => if valid => process_ibrec()
+        ulint offsets[MAX_TABLE_FIELDS + 2];
+        table_def_t* table = &table_definitions[0];
 
-      // (A) We'll do the undrop approach: check_for_a_record() => if valid => process_ibrec()
-      rec_t* rec = (rec_t*)(page + rec_offset);
-      ulint offsets[MAX_TABLE_FIELDS + 2];
+        bool valid = check_for_a_record(
+            (page_t*)page,
+            (rec_t*)rec,
+            table,
+            offsets);
 
-      // Using the JSON-based table you previously set
-      table_def_t* table = &table_definitions[0];
-
-      // (A.1) Attempt to build offsets + check constraints
-      bool valid = check_for_a_record(
-          (page_t*)page, 
-          rec, 
-          table, 
-          offsets);
-
-      // Debug data
-      debug_print_compact_row(page, rec, table, offsets);
-
-      if (valid) {
-        // (A.2) If valid => call process_ibrec() to print each column
-        bool hex_output = false; // or true if you want hex strings
-        process_ibrec((page_t*)page, rec, table, offsets, hex_output);
+        if (valid) {
+          debug_print_compact_row(page, rec, table, offsets);
+          bool hex_output = false;
+          process_ibrec((page_t*)page, (rec_t*)rec, table, offsets, hex_output);
+        } else {
+          n_invalid++;
+        }
+      } else {
+        n_deleted++;
       }
     }
 
-    if (next_off == rec_offset || next_off >= page_size) {
-      // corruption or end
+    ulint next_off = 0;
+    if (!next_compact_rec_offset((const page_t*)page,
+                                 rec_offset,
+                                 page_size,
+                                 &next_off)) {
+      n_invalid++;
       break;
     }
+
+    if (next_off == rec_offset || next_off >= page_size) {
+      n_invalid++;
+      break;
+    }
+
     rec_offset = next_off;
+    steps++;
   }
 
   std::cout << "Leaf Page " << page_no
-            << " had " << n_records << " user records.\n";
+            << " had " << n_records << " user records";
+  if (n_deleted > 0 || n_invalid > 0) {
+    std::cout << " (" << n_deleted << " deleted, "
+              << n_invalid << " invalid)";
+  }
+  std::cout << ".\n";
 }
