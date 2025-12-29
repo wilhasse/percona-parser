@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Verbose output helper
+VERBOSE=${VERBOSE:-0}
+log_verbose() {
+    if [ "$VERBOSE" = "1" ]; then
+        echo -e "\033[0;36m  [SQL] $1\033[0m"
+    fi
+}
+
 DB_USER=${DB_USER:-root}
 DB_PASS=${DB_PASS:-}
 DB_NAME=${DB_NAME:-test_lob_decode}
@@ -30,7 +38,11 @@ fi
 echo "Using MySQL time_zone: ${MYSQL_TZ}"
 
 echo "==> Creating fixture schema and data"
+log_verbose "DROP DATABASE IF EXISTS $DB_NAME"
+log_verbose "CREATE DATABASE $DB_NAME"
 "${MYSQL[@]}" -e "DROP DATABASE IF EXISTS $DB_NAME; CREATE DATABASE $DB_NAME;"
+
+log_verbose "CREATE TABLE $TABLE_NAME (id INT, note VARCHAR(50), big_text LONGTEXT, big_blob LONGBLOB) ROW_FORMAT=DYNAMIC"
 "${MYSQL[@]}" "$DB_NAME" <<SQL
 SET time_zone='${MYSQL_TZ}';
 CREATE TABLE $TABLE_NAME (
@@ -48,8 +60,10 @@ VALUES
   (1, 'alpha', @txt, @blob),
   (2, 'beta', CONCAT(@txt, 'Z'), UNHEX(REPEAT('1234', 15000)));
 SQL
+log_verbose "INSERT INTO $TABLE_NAME: 2 rows with LONGTEXT (~104KB) and LONGBLOB (~40KB/30KB)"
 
 echo "==> Exporting .ibd and SDI"
+log_verbose "FLUSH TABLES $TABLE_NAME FOR EXPORT"
 "${MYSQL[@]}" "$DB_NAME" -e "FLUSH TABLES $TABLE_NAME FOR EXPORT;"
 
 if ! sudo test -f "$IBD_PATH"; then

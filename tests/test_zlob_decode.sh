@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Verbose output helper
+VERBOSE=${VERBOSE:-0}
+log_verbose() {
+    if [ "$VERBOSE" = "1" ]; then
+        echo -e "\033[0;36m  [SQL] $1\033[0m"
+    fi
+}
+
 DB_USER=${DB_USER:-root}
 DB_PASS=${DB_PASS:-}
 DB_NAME=${DB_NAME:-test_zlob_decode}
@@ -37,7 +45,11 @@ fi
 echo "Using MySQL time_zone: ${MYSQL_TZ}"
 
 echo "==> Creating compressed fixture schema and data"
+log_verbose "DROP DATABASE IF EXISTS $DB_NAME"
+log_verbose "CREATE DATABASE $DB_NAME"
 "${MYSQL[@]}" -e "DROP DATABASE IF EXISTS $DB_NAME; CREATE DATABASE $DB_NAME;"
+
+log_verbose "CREATE TABLE $TABLE_NAME (id INT, note VARCHAR(50), big_text LONGTEXT, big_blob LONGBLOB) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=${KEY_BLOCK_SIZE}"
 "${MYSQL[@]}" "$DB_NAME" <<SQL
 SET time_zone='${MYSQL_TZ}';
 CREATE TABLE $TABLE_NAME (
@@ -55,7 +67,9 @@ VALUES
   (1, 'alpha', @txt, @blob),
   (2, 'beta', CONCAT(@txt, 'Z'), UNHEX(REPEAT('1234', 15000)));
 SQL
+log_verbose "INSERT INTO $TABLE_NAME: 2 rows with LONGTEXT (~104KB) and LONGBLOB (~40KB/30KB) - compressed storage"
 
+log_verbose "Verifying ROW_FORMAT=Compressed"
 ROW_FORMAT=$("${MYSQL[@]}" -N -B -e \
   "SELECT ROW_FORMAT FROM information_schema.tables WHERE table_schema='${DB_NAME}' AND table_name='${TABLE_NAME}';")
 if [ "$ROW_FORMAT" != "Compressed" ]; then
@@ -64,6 +78,7 @@ if [ "$ROW_FORMAT" != "Compressed" ]; then
 fi
 
 echo "==> Exporting .ibd and SDI"
+log_verbose "FLUSH TABLES $TABLE_NAME FOR EXPORT"
 "${MYSQL[@]}" "$DB_NAME" -e "FLUSH TABLES $TABLE_NAME FOR EXPORT;"
 
 if ! sudo test -f "$IBD_PATH"; then

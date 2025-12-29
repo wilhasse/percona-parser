@@ -6,6 +6,14 @@
 
 set -e  # Exit on error
 
+# Verbose output helper
+VERBOSE=${VERBOSE:-0}
+log_verbose() {
+    if [ "$VERBOSE" = "1" ]; then
+        echo -e "\033[0;36m  [SQL] $1\033[0m"
+    fi
+}
+
 echo "==========================================="
 echo "Testing COMPRESSED Table Processing"
 echo "==========================================="
@@ -31,6 +39,8 @@ echo -e "${YELLOW}Step 1: Creating test database and compressed table${NC}"
 echo "Performing complete cleanup of test databases..."
 
 # First try to drop databases in MySQL if MySQL is running
+log_verbose "DROP DATABASE IF EXISTS $DB_NAME"
+log_verbose "DROP DATABASE IF EXISTS ${DB_NAME}_import"
 mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null || true
 mysql -u$DB_USER -e "DROP DATABASE IF EXISTS ${DB_NAME}_import;" 2>/dev/null || true
 
@@ -48,8 +58,10 @@ while ! mysql -u$DB_USER -e "SELECT 1;" >/dev/null 2>&1; do
     echo "Waiting for MySQL to be ready..."
     sleep 1
 done
+log_verbose "CREATE DATABASE $DB_NAME"
 mysql -u$DB_USER -e "CREATE DATABASE $DB_NAME;"
 
+log_verbose "CREATE TABLE $TABLE_NAME (id INT, data VARCHAR(255), number INT, created_at TIMESTAMP) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8"
 mysql -u$DB_USER $DB_NAME <<EOF
 CREATE TABLE $TABLE_NAME (
     id INT PRIMARY KEY AUTO_INCREMENT,
@@ -81,8 +93,10 @@ FROM $TABLE_NAME;
 
 SELECT COUNT(*) as row_count FROM $TABLE_NAME;
 EOF
+log_verbose "INSERT INTO $TABLE_NAME: 5 rows + 3 rounds of generated data (~40 rows)"
 
 echo -e "${YELLOW}Step 2: Flushing table and getting .ibd file path${NC}"
+log_verbose "FLUSH TABLES $TABLE_NAME FOR EXPORT"
 mysql -u$DB_USER $DB_NAME -e "FLUSH TABLES $TABLE_NAME FOR EXPORT;"
 
 # Get the actual .ibd file path
@@ -99,6 +113,7 @@ fi
 sudo cp "$IBD_PATH" "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_compressed.ibd"
 sudo chown $(whoami):$(whoami) "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_compressed.ibd"
 
+log_verbose "UNLOCK TABLES"
 mysql -u$DB_USER $DB_NAME -e "UNLOCK TABLES;"
 
 echo -e "${YELLOW}Step 3: Decompressing with ib_parser${NC}"
@@ -107,9 +122,11 @@ cd $PARSER_DIR
 
 echo -e "${YELLOW}Step 4: Creating new database for import${NC}"
 IMPORT_DB_NAME="${DB_NAME}_import"
+log_verbose "CREATE DATABASE $IMPORT_DB_NAME"
 mysql -u$DB_USER -e "CREATE DATABASE $IMPORT_DB_NAME;"
 
 echo -e "${YELLOW}Step 5: Creating new uncompressed table with same structure${NC}"
+log_verbose "CREATE TABLE $IMPORT_TABLE (id INT, data VARCHAR(255), number INT, created_at TIMESTAMP) ROW_FORMAT=DYNAMIC"
 mysql -u$DB_USER $IMPORT_DB_NAME <<EOF
 CREATE TABLE $IMPORT_TABLE (
     id INT PRIMARY KEY AUTO_INCREMENT,
@@ -120,6 +137,7 @@ CREATE TABLE $IMPORT_TABLE (
 EOF
 
 echo -e "${YELLOW}Step 6: Preparing for import - discarding tablespace${NC}"
+log_verbose "ALTER TABLE $IMPORT_TABLE DISCARD TABLESPACE"
 mysql -u$DB_USER $IMPORT_DB_NAME -e "ALTER TABLE $IMPORT_TABLE DISCARD TABLESPACE;"
 
 echo -e "${YELLOW}Step 7: Stopping MySQL to copy the decompressed file${NC}"
@@ -140,6 +158,7 @@ sudo systemctl start mysql
 sleep 3
 
 echo -e "${YELLOW}Step 10: Attempting to import the decompressed tablespace${NC}"
+log_verbose "ALTER TABLE $IMPORT_TABLE IMPORT TABLESPACE"
 if ! mysql -u$DB_USER $IMPORT_DB_NAME -e "ALTER TABLE $IMPORT_TABLE IMPORT TABLESPACE;" 2>&1; then
     echo ""
     echo -e "${YELLOW}Note: MySQL import failed due to ROW_FORMAT metadata mismatch.${NC}"

@@ -79,7 +79,7 @@ run_test() {
     if [ "$VERBOSE" = "true" ]; then
         # Verbose mode: show output in real-time and also save to log
         echo -e "${CYAN}----------------------------------------${NC}"
-        if bash "$test_script" 2>&1 | tee "$log_file"; then
+        if VERBOSE=1 bash "$test_script" 2>&1 | tee "$log_file"; then
             exit_code=0
         else
             exit_code=1

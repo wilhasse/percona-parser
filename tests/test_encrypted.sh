@@ -6,6 +6,14 @@
 
 set -e  # Exit on error
 
+# Verbose output helper
+VERBOSE=${VERBOSE:-0}
+log_verbose() {
+    if [ "$VERBOSE" = "1" ]; then
+        echo -e "\033[0;36m  [SQL] $1\033[0m"
+    fi
+}
+
 echo "==========================================="
 echo "Testing ENCRYPTED Table Processing"
 echo "==========================================="
@@ -29,6 +37,7 @@ NC='\033[0m' # No Color
 
 echo -e "${YELLOW}Step 1: Checking encryption availability${NC}"
 # Check if encryption is available by testing table creation
+log_verbose "CREATE DATABASE IF NOT EXISTS _encryption_test_tmp_ (encryption check)"
 mysql -u$DB_USER -e "CREATE DATABASE IF NOT EXISTS _encryption_test_tmp_;" 2>/dev/null
 if ! mysql -u$DB_USER -e "CREATE TABLE _encryption_test_tmp_.enc_check (id INT) ENCRYPTION='Y';" 2>/dev/null; then
     echo -e "${YELLOW}SKIPPED: Encryption not available (keyring not configured)${NC}"
@@ -40,9 +49,12 @@ mysql -u$DB_USER -e "DROP DATABASE IF EXISTS _encryption_test_tmp_;" 2>/dev/null
 echo -e "${GREEN}Encryption is available${NC}"
 
 echo -e "${YELLOW}Step 2: Creating test database and encrypted table${NC}"
+log_verbose "DROP DATABASE IF EXISTS $DB_NAME"
 mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $DB_NAME;"
+log_verbose "CREATE DATABASE $DB_NAME"
 mysql -u$DB_USER -e "CREATE DATABASE $DB_NAME;"
 
+log_verbose "CREATE TABLE $TABLE_NAME (id INT, sensitive_data VARCHAR(255), secret_number INT, created_at TIMESTAMP) ENCRYPTION='Y'"
 mysql -u$DB_USER $DB_NAME <<EOF
 CREATE TABLE $TABLE_NAME (
     id INT PRIMARY KEY AUTO_INCREMENT,
@@ -70,6 +82,7 @@ FROM $TABLE_NAME;
 
 SELECT COUNT(*) as row_count FROM $TABLE_NAME;
 EOF
+log_verbose "INSERT INTO $TABLE_NAME: 5 rows + 2 rounds of generated data (~20 rows)"
 
 echo -e "${YELLOW}Step 3: Getting encryption info${NC}"
 # Get server UUID and master key ID
@@ -97,6 +110,7 @@ fi
 echo "Keyring file: $KEYRING_FILE"
 
 echo -e "${YELLOW}Step 4: Flushing table and getting .ibd file path${NC}"
+log_verbose "FLUSH TABLES $TABLE_NAME FOR EXPORT"
 mysql -u$DB_USER $DB_NAME -e "FLUSH TABLES $TABLE_NAME FOR EXPORT;"
 
 # Get the actual .ibd file path
@@ -115,9 +129,11 @@ sudo chown $(whoami):$(whoami) "$PARSER_DIR/tests/${TABLE_NAME}_encrypted.ibd"
 sudo cp "$KEYRING_FILE" "$PARSER_DIR/tests/keyring_backup"
 sudo chown $(whoami):$(whoami) "$PARSER_DIR/tests/keyring_backup"
 
+log_verbose "UNLOCK TABLES"
 mysql -u$DB_USER $DB_NAME -e "UNLOCK TABLES;"
 
 echo -e "${YELLOW}Step 5: Creating import table structure${NC}"
+log_verbose "CREATE TABLE $IMPORT_TABLE (id INT, sensitive_data VARCHAR(255), secret_number INT, created_at TIMESTAMP) ENCRYPTION='N'"
 mysql -u$DB_USER $DB_NAME <<EOF
 CREATE TABLE $IMPORT_TABLE (
     id INT PRIMARY KEY AUTO_INCREMENT,
@@ -128,6 +144,7 @@ CREATE TABLE $IMPORT_TABLE (
 EOF
 
 echo -e "${YELLOW}Step 6: Preparing for import - discarding tablespace${NC}"
+log_verbose "ALTER TABLE $IMPORT_TABLE DISCARD TABLESPACE"
 mysql -u$DB_USER $DB_NAME -e "ALTER TABLE $IMPORT_TABLE DISCARD TABLESPACE;"
 
 echo -e "${YELLOW}Step 7: Stopping MySQL to process the file${NC}"
