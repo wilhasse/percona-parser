@@ -27,6 +27,9 @@ echo "This will test:"
 echo "1. Compressed tables"
 echo "2. Encrypted tables"
 echo "3. Encrypted + Compressed tables"
+echo "4. Type decoding (DECIMAL, DATE, TIME, ENUM, SET)"
+echo "5. LOB external decoding (LONGTEXT, LONGBLOB)"
+echo "6. ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)"
 echo ""
 
 # Function to run a test and capture results
@@ -107,6 +110,33 @@ echo ""
 # Test 3: Encrypted + Compressed tables
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "ENCRYPTED_COMPRESSED_TABLES" "$SCRIPT_DIR/test_encrypted_compressed.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+echo ""
+
+# Test 4: Type decoding (DECIMAL, DATE, TIME, ENUM, SET, etc.)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "TYPE_DECODING" "$SCRIPT_DIR/test_types_decode.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+echo ""
+
+# Test 5: LOB external decoding (LONGTEXT, LONGBLOB)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "LOB_DECODING" "$SCRIPT_DIR/test_lob_decode.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+echo ""
+
+# Test 6: ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "ZLOB_DECODING" "$SCRIPT_DIR/test_zlob_decode.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
     FAILED_TESTS=$((FAILED_TESTS + 1))
