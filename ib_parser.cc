@@ -17,6 +17,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <limits>
 #include <unistd.h>
 
 // MySQL/Percona, OpenSSL, etc.
@@ -300,7 +301,9 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
   if (argc < 3) {
     std::cerr << "Usage for mode=5 (rebuild-uncompressed):\n"
               << "  ib_parser 5 <in_file> <out_file> [--sdi-json=PATH]\n"
-              << "    [--target-sdi-json=PATH] [--index-id-map=PATH] [--cfg-out=PATH]\n";
+              << "    [--target-sdi-json=PATH] [--index-id-map=PATH]\n"
+              << "    [--target-sdi-root=N] [--use-target-sdi-root|--use-source-sdi-root]\n"
+              << "    [--target-ibd=PATH] [--cfg-out=PATH]\n";
     return 1;
   }
 
@@ -314,6 +317,11 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
   const char* target_sdi_json = nullptr;
   const char* index_id_map = nullptr;
   const char* cfg_out = nullptr;
+  const char* target_ibd = nullptr;
+  bool use_target_sdi_root = false;
+  bool use_source_sdi_root = false;
+  bool target_sdi_root_override_set = false;
+  uint32_t target_sdi_root_override = 0;
 
   for (int i = 3; i < argc; ++i) {
     const char* arg = argv[i];
@@ -331,6 +339,43 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
     }
     if (strcmp(arg, "--target-sdi-json") == 0 && i + 1 < argc) {
       target_sdi_json = argv[++i];
+      continue;
+    }
+    if (strncmp(arg, "--target-ibd=", 13) == 0) {
+      target_ibd = arg + 13;
+      continue;
+    }
+    if (strcmp(arg, "--target-ibd") == 0 && i + 1 < argc) {
+      target_ibd = argv[++i];
+      continue;
+    }
+    if (strncmp(arg, "--target-sdi-root=", 18) == 0) {
+      const char* value = arg + 18;
+      unsigned long long root = std::strtoull(value, nullptr, 10);
+      if (root > std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "Invalid --target-sdi-root value\n";
+        return 1;
+      }
+      target_sdi_root_override = static_cast<uint32_t>(root);
+      target_sdi_root_override_set = true;
+      continue;
+    }
+    if (strcmp(arg, "--target-sdi-root") == 0 && i + 1 < argc) {
+      unsigned long long root = std::strtoull(argv[++i], nullptr, 10);
+      if (root > std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "Invalid --target-sdi-root value\n";
+        return 1;
+      }
+      target_sdi_root_override = static_cast<uint32_t>(root);
+      target_sdi_root_override_set = true;
+      continue;
+    }
+    if (strcmp(arg, "--use-target-sdi-root") == 0) {
+      use_target_sdi_root = true;
+      continue;
+    }
+    if (strcmp(arg, "--use-source-sdi-root") == 0) {
+      use_source_sdi_root = true;
       continue;
     }
     if (strncmp(arg, "--index-id-map=", 15) == 0) {
@@ -358,6 +403,11 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
     return 1;
   }
 
+  if (use_target_sdi_root && use_source_sdi_root) {
+    std::cerr << "Error: --use-target-sdi-root and --use-source-sdi-root are mutually exclusive.\n";
+    return 1;
+  }
+
   if (cfg_out != nullptr &&
       (target_sdi_json == nullptr && source_sdi_json == nullptr)) {
     std::cerr << "Error: --cfg-out requires --sdi-json or --target-sdi-json.\n";
@@ -377,7 +427,10 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
   }
 
   bool ok = rebuild_uncompressed_ibd(in_fd, out_fd, source_sdi_json,
-                                     target_sdi_json, index_id_map, cfg_out);
+                                     target_sdi_json, index_id_map, cfg_out,
+                                     use_target_sdi_root, use_source_sdi_root,
+                                     target_sdi_root_override_set,
+                                     target_sdi_root_override, target_ibd);
   my_close(in_fd, MYF(0));
   my_close(out_fd, MYF(0));
   return ok ? 0 : 1;

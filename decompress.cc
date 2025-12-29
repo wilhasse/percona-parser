@@ -595,6 +595,7 @@ struct SdiTablespaceInfo {
   std::string name;
   std::string options;
   std::string se_private_data;
+  std::vector<std::string> files;
 };
 
 struct SdiMetadata {
@@ -685,6 +686,116 @@ static bool parse_uint32_value(const std::string& s, uint32_t* out) {
     return false;
   }
   *out = static_cast<uint32_t>(tmp);
+  return true;
+}
+
+static bool file_exists(const std::string& path) {
+  struct stat st;
+  return !path.empty() && stat(path.c_str(), &st) == 0;
+}
+
+static bool resolve_tablespace_path(const std::string& path,
+                                    std::string* resolved) {
+  if (resolved == nullptr || path.empty()) {
+    return false;
+  }
+
+  if (file_exists(path)) {
+    *resolved = path;
+    return true;
+  }
+
+  std::string trimmed = path;
+  if (trimmed.rfind("./", 0) == 0) {
+    trimmed = trimmed.substr(2);
+  } else if (trimmed.rfind(".\\", 0) == 0) {
+    trimmed = trimmed.substr(2);
+  }
+
+  const char* datadir = std::getenv("MYSQL_DATADIR");
+  if (datadir == nullptr || *datadir == '\0') {
+    datadir = std::getenv("IB_PARSER_DATADIR");
+  }
+
+  if (datadir != nullptr && *datadir != '\0') {
+    std::string candidate(datadir);
+    if (!candidate.empty() && candidate.back() != '/') {
+      candidate.push_back('/');
+    }
+    candidate.append(trimmed);
+    if (file_exists(candidate)) {
+      *resolved = std::move(candidate);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool read_sdi_root_from_tablespace(const std::string& path,
+                                          page_no_t* root_page,
+                                          uint32_t* version,
+                                          std::string* err) {
+  if (root_page == nullptr || version == nullptr) {
+    if (err) {
+      *err = "invalid output pointers";
+    }
+    return false;
+  }
+
+  File fd = my_open(path.c_str(), O_RDONLY, MYF(0));
+  if (fd < 0) {
+    if (err) {
+      *err = "cannot open target tablespace file";
+    }
+    return false;
+  }
+
+  page_size_t pg_sz(0, 0, false);
+  if (!determine_page_size(fd, pg_sz)) {
+    my_close(fd, MYF(0));
+    if (err) {
+      *err = "could not determine target page size";
+    }
+    return false;
+  }
+
+  const size_t physical_size = pg_sz.physical();
+  std::vector<byte> buf(physical_size);
+  if (my_seek(fd, 0, MY_SEEK_SET, MYF(0)) == MY_FILEPOS_ERROR) {
+    my_close(fd, MYF(0));
+    if (err) {
+      *err = "seek failed";
+    }
+    return false;
+  }
+  size_t r = my_read(fd, buf.data(), physical_size, MYF(0));
+  my_close(fd, MYF(0));
+  if (r != physical_size) {
+    if (err) {
+      *err = "failed to read page 0";
+    }
+    return false;
+  }
+
+  const uint32_t flags = fsp_header_get_flags(buf.data());
+  if (!fsp_flags_is_valid(flags)) {
+    if (err) {
+      *err = "invalid FSP flags";
+    }
+    return false;
+  }
+  if (!FSP_FLAGS_HAS_SDI(flags)) {
+    if (err) {
+      *err = "tablespace has no SDI flag";
+    }
+    return false;
+  }
+
+  const page_size_t page_size(flags);
+  const ulint sdi_offset = fsp_header_get_sdi_offset(page_size);
+  *version = mach_read_from_4(buf.data() + sdi_offset);
+  *root_page = mach_read_from_4(buf.data() + sdi_offset + 4);
   return true;
 }
 
@@ -1037,6 +1148,16 @@ static bool load_sdi_metadata(const char* json_path, SdiMetadata* meta) {
       }
       if (dd_obj.HasMember("se_private_data")) {
         sdi_read_string(dd_obj["se_private_data"], &space.se_private_data);
+      }
+      if (dd_obj.HasMember("files") && dd_obj["files"].IsArray()) {
+        for (const auto& file : dd_obj["files"].GetArray()) {
+          if (!file.IsObject()) {
+            continue;
+          }
+          if (file.HasMember("filename") && file["filename"].IsString()) {
+            space.files.emplace_back(file["filename"].GetString());
+          }
+        }
       }
       meta->tablespace = std::move(space);
     }
@@ -3083,7 +3204,12 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
                               const char* source_sdi_json_path,
                               const char* target_sdi_json_path,
                               const char* index_id_map_path,
-                              const char* cfg_out_path)
+                              const char* cfg_out_path,
+                              bool use_target_sdi_root,
+                              bool use_source_sdi_root,
+                              bool target_sdi_root_override_set,
+                              uint32_t target_sdi_root_override,
+                              const char* target_ibd_path)
 {
   MY_STAT stat_info;
   if (my_fstat(in_fd, &stat_info) != 0) {
@@ -3136,6 +3262,10 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
   std::unordered_map<uint64_t, uint64_t> index_id_remap;
   bool want_cfg = (cfg_out_path != nullptr);
   page_no_t sdi_root_page = FIL_NULL;
+  page_no_t source_sdi_root_page = FIL_NULL;
+  page_no_t target_sdi_root_page = FIL_NULL;
+  bool target_sdi_root_set = false;
+  uint32_t target_sdi_root_version = 0;
   bool sdi_root_set = false;
   uint32_t space_flags = 0;
   bool space_flags_set = false;
@@ -3205,6 +3335,56 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
     }
   }
 
+  if (target_sdi_root_override_set) {
+    target_sdi_root_page = static_cast<page_no_t>(target_sdi_root_override);
+    target_sdi_root_set = true;
+  } else if (target_ibd_path != nullptr) {
+    std::string err;
+    if (read_sdi_root_from_tablespace(target_ibd_path, &target_sdi_root_page,
+                                      &target_sdi_root_version, &err)) {
+      target_sdi_root_set = true;
+      fprintf(stderr,
+              "Target SDI header: version=%u root_page=%u (file=%s)\n",
+              target_sdi_root_version,
+              static_cast<unsigned int>(target_sdi_root_page),
+              target_ibd_path);
+    } else {
+      fprintf(stderr,
+              "Warning: unable to read target SDI root from %s: %s\n",
+              target_ibd_path, err.c_str());
+    }
+  } else if (have_target_meta && !target_meta.tablespace.files.empty()) {
+    const std::string& raw_path = target_meta.tablespace.files.front();
+    std::string resolved;
+    if (resolve_tablespace_path(raw_path, &resolved)) {
+      std::string err;
+      if (read_sdi_root_from_tablespace(resolved, &target_sdi_root_page,
+                                        &target_sdi_root_version, &err)) {
+        target_sdi_root_set = true;
+        fprintf(stderr,
+                "Target SDI header: version=%u root_page=%u (file=%s)\n",
+                target_sdi_root_version,
+                static_cast<unsigned int>(target_sdi_root_page),
+                resolved.c_str());
+      } else {
+        fprintf(stderr,
+                "Warning: unable to read target SDI root from %s: %s\n",
+                resolved.c_str(), err.c_str());
+      }
+    } else {
+      fprintf(stderr,
+              "Warning: target SDI root lookup skipped (cannot resolve '%s').\n"
+              "         Set MYSQL_DATADIR, use --target-ibd, or pass --target-sdi-root.\n",
+              raw_path.c_str());
+    }
+  }
+
+  if (use_target_sdi_root && !target_sdi_root_set) {
+    fprintf(stderr,
+            "Error: --use-target-sdi-root requires target SDI root data.\n");
+    return false;
+  }
+
   if (want_cfg && !have_output_sdi_json) {
     fprintf(stderr, "Error: --cfg-out requires SDI JSON metadata.\n");
     return false;
@@ -3258,7 +3438,35 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
         const ulint sdi_offset = fsp_header_get_sdi_offset(old_page_size);
         const uint32_t sdi_version =
             mach_read_from_4(in_buf.get() + sdi_offset);
-        sdi_root_page = mach_read_from_4(in_buf.get() + sdi_offset + 4);
+        source_sdi_root_page = mach_read_from_4(in_buf.get() + sdi_offset + 4);
+        sdi_root_page = source_sdi_root_page;
+        if (target_sdi_root_set &&
+            (target_sdi_root_page == 0 || target_sdi_root_page == FIL_NULL)) {
+          fprintf(stderr,
+                  "Warning: target SDI root page is invalid (%u); ignoring.\n",
+                  static_cast<unsigned int>(target_sdi_root_page));
+          target_sdi_root_set = false;
+        }
+        if (target_sdi_root_set &&
+            target_sdi_root_page != source_sdi_root_page) {
+          fprintf(stderr,
+                  "Warning: SDI root mismatch (source=%u target=%u).\n",
+                  static_cast<unsigned int>(source_sdi_root_page),
+                  static_cast<unsigned int>(target_sdi_root_page));
+          if (use_target_sdi_root) {
+            sdi_root_page = target_sdi_root_page;
+            fprintf(stderr,
+                    "         Using target SDI root page as requested.\n");
+          } else {
+            fprintf(stderr,
+                    "         Using source SDI root page (default).\n");
+          }
+        } else if (use_target_sdi_root && target_sdi_root_set) {
+          sdi_root_page = target_sdi_root_page;
+        }
+        if (use_source_sdi_root) {
+          sdi_root_page = source_sdi_root_page;
+        }
         sdi_root_set = (sdi_root_page != 0 && sdi_root_page != FIL_NULL);
         fprintf(stderr,
                 "SDI header: version=%u root_page=%u (json=%s)\n",

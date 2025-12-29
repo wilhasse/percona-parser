@@ -103,6 +103,21 @@ Optional: provide an explicit index-id mapping file (one `old=new` per line):
   --cfg-out=rebuilt.cfg
 ```
 
+If the target SDI root page differs, `ib_parser` will warn. By default the
+source SDI root page is used. To force the target root page (when known), pass:
+
+```bash
+./build/ib_parser 5 source.ibd rebuilt.ibd \
+  --sdi-json=source_sdi.json \
+  --target-sdi-json=target_sdi.json \
+  --use-target-sdi-root
+```
+
+When target SDI JSON contains a relative tablespace path, set `MYSQL_DATADIR`
+or `IB_PARSER_DATADIR` so the tool can locate the target .ibd header for root
+comparison. You can also pass `--target-ibd=PATH` (pointing to a readable copy)
+or supply `--target-sdi-root=N` to override manually.
+
 Import steps (example):
 
 ```bash
