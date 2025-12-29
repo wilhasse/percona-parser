@@ -44,6 +44,7 @@
 #include "decrypt.h"     // Contains e.g. decrypt_page_inplace(), get_master_key() ...
 #include "decompress.h"  // Contains e.g. decompress_page_inplace(), etc.
 #include "parser.h"      // Contains parser logic
+#include "undrop_for_innodb.h"
 
 struct XdesCache {
   page_no_t page_no = FIL_NULL;
@@ -124,13 +125,13 @@ static void usage() {
             << "Where <mode> is:\n"
             << "  1 = Decrypt only\n"
             << "  2 = Decompress only\n"
-            << "  3 = Parser only\n"
+            << "  3 = Parse only\n"
             << "  4 = Decrypt then Decompress in a single pass\n"
             << "  5 = Rebuild to uncompressed (experimental)\n\n"
             << "Examples:\n"
             << "  ib_parser 1 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 2 <in_file.ibd> <out_file>\n"
-            << "  ib_parser 3 <in_file.ibd> <table_def.json>\n"
+            << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta]\n"
             << "  ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 5 <in_file.ibd> <out_file>\n"
             << std::endl;
@@ -284,12 +285,71 @@ static int do_parse_main(int argc, char** argv)
 {
   if (argc < 3) {
     std::cerr << "Usage for mode=3 (parse-only):\n"
-              << "  ib_parser 3 <in_file.ibd> <table_def.json>\n";
+              << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta]\n";
     return 1;
   }
 
   const char* in_file = argv[1];
   const char* json_file = argv[2];
+  const char* out_path = nullptr;
+  RowOutputOptions output_opts;
+  output_opts.format = ROW_OUTPUT_PIPE;
+  output_opts.include_meta = false;
+  output_opts.out = nullptr;
+
+  for (int i = 3; i < argc; i++) {
+    std::string arg = argv[i];
+    if (arg == "--with-meta") {
+      output_opts.include_meta = true;
+      continue;
+    }
+    if (arg.rfind("--format=", 0) == 0) {
+      std::string fmt = arg.substr(std::strlen("--format="));
+      if (fmt == "pipe") {
+        output_opts.format = ROW_OUTPUT_PIPE;
+      } else if (fmt == "csv") {
+        output_opts.format = ROW_OUTPUT_CSV;
+      } else if (fmt == "jsonl") {
+        output_opts.format = ROW_OUTPUT_JSONL;
+      } else {
+        std::cerr << "Unknown format: " << fmt << "\n";
+        return 1;
+      }
+      continue;
+    }
+    if (arg == "--format") {
+      if (i + 1 >= argc) {
+        std::cerr << "--format requires a value\n";
+        return 1;
+      }
+      std::string fmt = argv[++i];
+      if (fmt == "pipe") {
+        output_opts.format = ROW_OUTPUT_PIPE;
+      } else if (fmt == "csv") {
+        output_opts.format = ROW_OUTPUT_CSV;
+      } else if (fmt == "jsonl") {
+        output_opts.format = ROW_OUTPUT_JSONL;
+      } else {
+        std::cerr << "Unknown format: " << fmt << "\n";
+        return 1;
+      }
+      continue;
+    }
+    if (arg.rfind("--output=", 0) == 0) {
+      out_path = argv[i] + std::strlen("--output=");
+      continue;
+    }
+    if (arg == "--output") {
+      if (i + 1 >= argc) {
+        std::cerr << "--output requires a path\n";
+        return 1;
+      }
+      out_path = argv[++i];
+      continue;
+    }
+    std::cerr << "Unknown argument: " << arg << "\n";
+    return 1;
+  }
 
   // 0) Load table definition and extract table name
   std::string table_name;
@@ -369,6 +429,21 @@ static int do_parse_main(int argc, char** argv)
   if (parser_debug_enabled()) {
     debug_print_table_def(&my_table);
   }
+
+  FILE* out_file = nullptr;
+  if (out_path && *out_path) {
+    out_file = std::fopen(out_path, "wb");
+    if (!out_file) {
+      std::cerr << "Cannot open output file " << out_path << "\n";
+      my_close(in_fd, MYF(0));
+      ::close(sys_fd);
+      my_thread_end();
+      my_end(0);
+      return 1;
+    }
+    output_opts.out = out_file;
+  }
+  set_row_output_options(output_opts);
 
   // 7) Allocate buffers
   std::unique_ptr<unsigned char[]> page_buf(new unsigned char[physical_page_size]);
@@ -459,6 +534,10 @@ static int do_parse_main(int argc, char** argv)
     parse_records_on_page(parse_buf, parse_size, page_no);
 
     page_no++;
+  }
+
+  if (out_file) {
+    std::fclose(out_file);
   }
 
   my_close(in_fd, MYF(0));

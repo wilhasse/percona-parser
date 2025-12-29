@@ -1301,7 +1301,11 @@ void parse_records_on_page(const unsigned char* page,
             debug_print_compact_row(page, rec, table, offsets);
           }
           bool hex_output = false;
-          process_ibrec((page_t*)page, (rec_t*)rec, table, offsets, hex_output);
+          RowMeta meta;
+          meta.page_no = page_no;
+          meta.rec_offset = rec_offset;
+          meta.deleted = deleted;
+          process_ibrec((page_t*)page, (rec_t*)rec, table, offsets, hex_output, &meta);
         } else {
           n_invalid++;
         }

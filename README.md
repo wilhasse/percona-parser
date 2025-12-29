@@ -55,9 +55,19 @@ make -j4
 # Parse and extract records
 ./build/ib_parser 3 table.ibd table_definition.json
 
+# Parse and extract records as JSONL
+./build/ib_parser 3 table.ibd table_definition.json --format=jsonl --output=rows.jsonl
+
+# Include page/record metadata and internal columns (debug)
+IB_PARSER_DEBUG=1 ./build/ib_parser 3 table.ibd table_definition.json --with-meta
+
 # Decrypt and decompress
 ./build/ib_parser 4 <key_id> <server_uuid> keyring.file encrypted_compressed.ibd output.ibd
 ```
+
+### Validation Harness
+
+See `scripts/validate_parse.sh` for a repeatable comparison against MySQL SELECT output (and optional undrop-for-innodb output).
 
 ## Library Usage
 
