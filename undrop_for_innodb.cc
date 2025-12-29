@@ -157,6 +157,16 @@ inline bool ibrec_init_offsets_new(const page_t* page,
   my_rec_offs_set_n_fields(offsets, (ulint)table->fields_count);
 
   const unsigned char* nulls = (const unsigned char*)rec - (REC_N_NEW_EXTRA_BYTES + 1);
+  ulint info_bits = rec_get_info_bits(rec, true);
+  if (info_bits & REC_INFO_VERSION_FLAG) {
+    nulls -= 1;
+  } else if (info_bits & REC_INFO_INSTANT_FLAG) {
+    uint16_t len = 1;
+    if ((*nulls & REC_N_FIELDS_TWO_BYTES_FLAG) != 0) {
+      len = 2;
+    }
+    nulls -= len;
+  }
   const unsigned char* lens  = nulls - ((table->n_nullable + 7) / 8);
 
   ulint offs = 0;

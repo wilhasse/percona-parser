@@ -8,6 +8,7 @@
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/istreamwrapper.h>
@@ -71,6 +72,7 @@ struct MyColumnDef {
     bool        is_virtual = false;
     int         hidden = 0;
     int         ordinal_position = 0;
+    int         column_opx = -1;
     int         numeric_precision = 0;
     int         numeric_scale = 0;
     int         datetime_precision = 0;
@@ -79,6 +81,10 @@ struct MyColumnDef {
 
 /** We store the columns here, loaded from JSON. */
 static std::vector<MyColumnDef> g_columns;
+static std::vector<MyColumnDef> g_columns_by_opx;
+
+static uint64_t read_be_uint(const unsigned char* ptr, size_t len);
+static int64_t read_be_int_signed(const unsigned char* ptr, size_t len);
 
 // We'll store the discovered ID in this struct:
 struct Dulint {
@@ -107,6 +113,71 @@ static bool btr_root_fseg_validate(const unsigned char* page, uint32_t space_id)
  */
 static inline uint64_t read_uint64_from_page(const unsigned char* ptr) {
   return mach_read_from_8(ptr);
+}
+
+struct IndexElement {
+  int column_opx = -1;
+  int ordinal_position = 0;
+};
+
+static bool build_primary_index_order(const rapidjson::Value& dd_obj,
+                                      std::vector<int>& out_order) {
+  if (!dd_obj.HasMember("indexes") || !dd_obj["indexes"].IsArray()) {
+    return false;
+  }
+
+  const rapidjson::Value* primary = nullptr;
+  for (auto& idx : dd_obj["indexes"].GetArray()) {
+    if (!idx.IsObject()) {
+      continue;
+    }
+    if (idx.HasMember("name") && idx["name"].IsString()) {
+      if (std::strcmp(idx["name"].GetString(), "PRIMARY") == 0) {
+        primary = &idx;
+        break;
+      }
+    }
+  }
+
+  if (!primary) {
+    return false;
+  }
+  if (!primary->HasMember("elements") || !(*primary)["elements"].IsArray()) {
+    return false;
+  }
+
+  std::vector<IndexElement> elems;
+  for (auto& el : (*primary)["elements"].GetArray()) {
+    if (!el.IsObject()) {
+      continue;
+    }
+    if (!el.HasMember("column_opx") || !el["column_opx"].IsInt()) {
+      continue;
+    }
+    IndexElement elem;
+    elem.column_opx = el["column_opx"].GetInt();
+    if (el.HasMember("ordinal_position") && el["ordinal_position"].IsInt()) {
+      elem.ordinal_position = el["ordinal_position"].GetInt();
+    }
+    elems.push_back(elem);
+  }
+
+  if (elems.empty()) {
+    return false;
+  }
+
+  std::sort(elems.begin(), elems.end(),
+            [](const IndexElement& a, const IndexElement& b) {
+              return a.ordinal_position < b.ordinal_position;
+            });
+
+  out_order.clear();
+  out_order.reserve(elems.size());
+  for (const auto& elem : elems) {
+    out_order.push_back(elem.column_opx);
+  }
+
+  return !out_order.empty();
 }
 
 // If you used "my_rec_offs_*" from the "undrop" style code:
@@ -205,14 +276,18 @@ void debug_print_compact_row(const page_t* page,
         case FT_INT:
         case FT_UINT:
             // If it's truly a 4-byte int, let's read it:
-            if (field_len == 4) {
-                // typical InnoDB "int" might also do sign-flipping. 
-                // For a quick debug, let's do:
-                uint32_t val = 0;
-                memcpy(&val, field_ptr, 4);
-                // If you do sign-flipping => val ^= 0x80000000;
-                printf("  [%2lu] %-15s => (INT) %u\n",
-                       i, table->fields[i].name, val);
+            if (field_len > 0 && field_len <= 8) {
+                if (table->fields[i].type == FT_UINT) {
+                    uint64_t val = read_be_uint(field_ptr, field_len);
+                    printf("  [%2lu] %-15s => (UINT) %llu\n",
+                           i, table->fields[i].name,
+                           static_cast<unsigned long long>(val));
+                } else {
+                    int64_t val = read_be_int_signed(field_ptr, field_len);
+                    printf("  [%2lu] %-15s => (INT) %lld\n",
+                           i, table->fields[i].name,
+                           static_cast<long long>(val));
+                }
             } else {
                 // length isn't 4 => just hex-dump or do naive printing
                 printf("  [%2lu] %-15s => (INT?) length=%lu => ",
@@ -416,6 +491,28 @@ static std::string to_lower_copy(const std::string& in) {
   std::transform(out.begin(), out.end(), out.begin(),
                  [](unsigned char c) { return std::tolower(c); });
   return out;
+}
+
+static uint64_t read_be_uint(const unsigned char* ptr, size_t len) {
+  uint64_t val = 0;
+  for (size_t i = 0; i < len; i++) {
+    val = (val << 8) | ptr[i];
+  }
+  return val;
+}
+
+static int64_t read_be_int_signed(const unsigned char* ptr, size_t len) {
+  if (len == 0 || len > 8) {
+    return 0;
+  }
+  uint64_t val = read_be_uint(ptr, len);
+  uint64_t sign_mask = 1ULL << (len * 8 - 1);
+  val ^= sign_mask;
+  if (val & sign_mask && len < 8) {
+    uint64_t mask = ~0ULL << (len * 8);
+    val |= mask;
+  }
+  return static_cast<int64_t>(val);
 }
 
 static bool parse_first_paren_number(const std::string& s, unsigned int* out) {
@@ -675,25 +772,37 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
         } else if (type.find("varbinary") != std::string::npos) {
             fld->type = FT_BIN;
             unsigned int max_len = col.char_length;
-            parse_first_paren_number(type, &max_len);
+            unsigned int parsed = 0;
+            if (parse_first_paren_number(type, &parsed) && max_len == 0) {
+                max_len = parsed;
+            }
             set_var(fld, max_len);
 
         } else if (type.find("binary") != std::string::npos) {
             fld->type = FT_BIN;
             unsigned int len = col.char_length;
-            parse_first_paren_number(type, &len);
+            unsigned int parsed = 0;
+            if (parse_first_paren_number(type, &parsed) && len == 0) {
+                len = parsed;
+            }
             set_fixed(fld, len);
 
         } else if (type.find("varchar") != std::string::npos) {
             fld->type = FT_CHAR;
             unsigned int max_len = col.char_length;
-            parse_first_paren_number(type, &max_len);
+            unsigned int parsed = 0;
+            if (parse_first_paren_number(type, &parsed) && max_len == 0) {
+                max_len = parsed;
+            }
             set_var(fld, max_len);
 
         } else if (type.find("char") != std::string::npos) {
             fld->type = FT_CHAR;
             unsigned int len = col.char_length;
-            parse_first_paren_number(type, &len);
+            unsigned int parsed = 0;
+            if (parse_first_paren_number(type, &parsed) && len == 0) {
+                len = parsed;
+            }
             set_fixed(fld, len);
 
         } else if (type.find("tinytext") != std::string::npos) {
@@ -864,16 +973,21 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
 
     const rapidjson::Value& columns = dd_obj["columns"];
     g_columns.clear();
+    g_columns_by_opx.clear();
+    g_columns_by_opx.resize(columns.Size());
 
     // 5) Iterate the columns array
-    for (auto& c : columns.GetArray()) {
-        if (!c.HasMember("name") || !c["name"].IsString()) {
-            std::cerr << "[Warn] Column is missing 'name'. Skipping.\n";
-            continue;
-        }
+    for (rapidjson::SizeType i = 0; i < columns.Size(); ++i) {
+        const rapidjson::Value& c = columns[i];
 
         MyColumnDef def{};
-        def.name = c["name"].GetString();
+        def.column_opx = static_cast<int>(i);
+        if (c.HasMember("name") && c["name"].IsString()) {
+            def.name = c["name"].GetString();
+        } else {
+            std::cerr << "[Warn] Column is missing 'name'.\n";
+            def.is_virtual = true;
+        }
 
         if (c.HasMember("column_type_utf8") && c["column_type_utf8"].IsString()) {
             def.type_utf8 = c["column_type_utf8"].GetString();
@@ -911,28 +1025,58 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
             def.elements_count = c["elements"].GetArray().Size();
         }
 
-        if (def.is_virtual) {
-            continue;
-        }
-
-        g_columns.push_back(def);
+        g_columns_by_opx[i] = def;
 
         std::cout << "[Debug] Added column: name='" << def.name
                   << "', type='" << def.type_utf8
                   << "', char_length=" << def.char_length
-                  << ", ordinal=" << def.ordinal_position << "\n";
+                  << ", ordinal=" << def.ordinal_position
+                  << ", opx=" << def.column_opx
+                  << (def.is_virtual ? " (virtual)" : "")
+                  << "\n";
     }
 
-    std::stable_sort(g_columns.begin(), g_columns.end(),
-                     [](const MyColumnDef& a, const MyColumnDef& b) {
-                         int a_pos = a.ordinal_position == 0
-                                         ? std::numeric_limits<int>::max()
-                                         : a.ordinal_position;
-                         int b_pos = b.ordinal_position == 0
-                                         ? std::numeric_limits<int>::max()
-                                         : b.ordinal_position;
-                         return a_pos < b_pos;
-                     });
+    std::vector<int> primary_order;
+    if (build_primary_index_order(dd_obj, primary_order)) {
+        for (int opx : primary_order) {
+            if (opx < 0 || opx >= static_cast<int>(g_columns_by_opx.size())) {
+                std::cerr << "[Warn] PRIMARY index refers to invalid column_opx="
+                          << opx << "\n";
+                continue;
+            }
+            const MyColumnDef& col = g_columns_by_opx[opx];
+            if (col.is_virtual) {
+                continue;
+            }
+            g_columns.push_back(col);
+        }
+        if (!g_columns.empty()) {
+            std::cout << "[Debug] Using PRIMARY index order for record parsing ("
+                      << g_columns.size() << " columns).\n";
+        }
+    }
+
+    if (g_columns.empty()) {
+        std::vector<MyColumnDef> ordered;
+        ordered.reserve(g_columns_by_opx.size());
+        for (const auto& col : g_columns_by_opx) {
+            if (!col.is_virtual) {
+                ordered.push_back(col);
+            }
+        }
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [](const MyColumnDef& a, const MyColumnDef& b) {
+                             int a_pos = a.ordinal_position == 0
+                                             ? std::numeric_limits<int>::max()
+                                             : a.ordinal_position;
+                             int b_pos = b.ordinal_position == 0
+                                             ? std::numeric_limits<int>::max()
+                                             : b.ordinal_position;
+                             return a_pos < b_pos;
+                         });
+        g_columns.swap(ordered);
+        std::cout << "[Warn] PRIMARY index order not found; using ordinal_position order.\n";
+    }
 
     ifs.close();
     return 0;
