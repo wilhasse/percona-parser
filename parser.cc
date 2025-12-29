@@ -1,6 +1,7 @@
 // Standard C++ includes
 #include <iostream>
 #include <cstdint>
+#include <cstddef>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -10,9 +11,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
+#include <unordered_map>
+// Keep RapidJSON SizeType consistent across translation units.
+#define RAPIDJSON_NO_SIZETYPEDEFINE
+namespace rapidjson { typedef ::std::size_t SizeType; }
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/istreamwrapper.h>
+#include <rapidjson/filereadstream.h>
 #include <fstream>
 #include <iostream>
 
@@ -84,12 +91,33 @@ struct MyColumnDef {
     bool        elements_complete = false;
 };
 
+struct IndexElementDef {
+    int column_opx = -1;
+    uint32_t length = 0xFFFFFFFFu;
+    int ordinal_position = 0;
+    bool hidden = false;
+};
+
+struct IndexDef {
+    std::string name;
+    uint64_t id = 0;
+    page_no_t root = FIL_NULL;
+    std::vector<IndexElementDef> elements;
+    bool is_primary = false;
+};
+
 /** We store the columns here, loaded from JSON. */
 static std::vector<MyColumnDef> g_columns;
 static std::vector<MyColumnDef> g_columns_by_opx;
+static std::vector<IndexDef> g_index_defs;
 
 static uint64_t read_be_uint(const unsigned char* ptr, size_t len);
 static int64_t read_be_int_signed(const unsigned char* ptr, size_t len);
+static std::string to_lower_copy(const std::string& in);
+static std::unordered_map<std::string, std::string> parse_kv_string(
+    const std::string& input);
+static bool parse_uint64_value(const std::string& s, uint64_t* out);
+static bool parse_uint32_value(const std::string& s, uint32_t* out);
 
 // We'll store the discovered ID in this struct:
 struct Dulint {
@@ -97,9 +125,11 @@ struct Dulint {
   uint32_t low;
 };
 
-// Global or static variable to store the discovered PRIMARY index ID.
-static Dulint g_primary_index_id = {0, 0}; 
-static bool   g_found_primary    = false;
+// Global or static variable to store the selected index ID.
+static Dulint g_target_index_id = {0, 0};
+static bool   g_found_target    = false;
+static std::string g_target_index_name = "PRIMARY";
+static page_no_t g_target_index_root = FIL_NULL;
 
 /**
  * btr_root_fseg_validate():
@@ -285,69 +315,227 @@ bool format_innodb_timestamp(const unsigned char* ptr, ulint len,
   return true;
 }
 
-struct IndexElement {
-  int column_opx = -1;
-  int ordinal_position = 0;
-};
+static void set_target_index_id(uint64_t id) {
+  g_target_index_id.high = static_cast<uint32_t>(id >> 32);
+  g_target_index_id.low = static_cast<uint32_t>(id & 0xffffffff);
+  g_found_target = true;
+}
 
-static bool build_primary_index_order(const rapidjson::Value& dd_obj,
-                                      std::vector<int>& out_order) {
+static const IndexDef* find_index_by_name(const std::string& name) {
+  const std::string needle = to_lower_copy(name);
+  for (const auto& idx : g_index_defs) {
+    if (to_lower_copy(idx.name) == needle) {
+      return &idx;
+    }
+  }
+  return nullptr;
+}
+
+static const IndexDef* find_index_by_id(uint64_t id) {
+  for (const auto& idx : g_index_defs) {
+    if (idx.id == id && id != 0) {
+      return &idx;
+    }
+  }
+  return nullptr;
+}
+
+static bool build_index_columns(const IndexDef& idx,
+                                std::vector<MyColumnDef>* out_columns) {
+  if (out_columns == nullptr) {
+    return false;
+  }
+  out_columns->clear();
+  if (idx.elements.empty()) {
+    return false;
+  }
+
+  std::vector<IndexElementDef> elems = idx.elements;
+  std::sort(elems.begin(), elems.end(),
+            [](const IndexElementDef& a, const IndexElementDef& b) {
+              return a.ordinal_position < b.ordinal_position;
+            });
+
+  for (const auto& elem : elems) {
+    if (elem.column_opx < 0 ||
+        elem.column_opx >= static_cast<int>(g_columns_by_opx.size())) {
+      std::cerr << "[Warn] Index '" << idx.name
+                << "' refers to invalid column_opx=" << elem.column_opx << "\n";
+      continue;
+    }
+
+    MyColumnDef col = g_columns_by_opx[elem.column_opx];
+    if (elem.length != 0xFFFFFFFFu && elem.length > 0) {
+      if (col.char_length == 0 || elem.length < col.char_length) {
+        col.char_length = elem.length;
+      }
+    }
+    out_columns->push_back(std::move(col));
+  }
+
+  return !out_columns->empty();
+}
+
+static bool parse_index_defs(const rapidjson::Value& dd_obj) {
+  g_index_defs.clear();
   if (!dd_obj.HasMember("indexes") || !dd_obj["indexes"].IsArray()) {
     return false;
   }
 
-  const rapidjson::Value* primary = nullptr;
   for (auto& idx : dd_obj["indexes"].GetArray()) {
     if (!idx.IsObject()) {
       continue;
     }
+
+    IndexDef def{};
     if (idx.HasMember("name") && idx["name"].IsString()) {
-      if (std::strcmp(idx["name"].GetString(), "PRIMARY") == 0) {
-        primary = &idx;
-        break;
+      def.name = idx["name"].GetString();
+      def.is_primary = (def.name == "PRIMARY");
+    }
+
+    if (idx.HasMember("se_private_data") && idx["se_private_data"].IsString()) {
+      const auto kv = parse_kv_string(idx["se_private_data"].GetString());
+      auto it = kv.find("id");
+      if (it != kv.end()) {
+        parse_uint64_value(it->second, &def.id);
+      }
+      auto root_it = kv.find("root");
+      if (root_it != kv.end()) {
+        uint32_t root = 0;
+        if (parse_uint32_value(root_it->second, &root)) {
+          def.root = static_cast<page_no_t>(root);
+        }
       }
     }
+
+    if (idx.HasMember("elements") && idx["elements"].IsArray()) {
+      for (auto& el : idx["elements"].GetArray()) {
+        if (!el.IsObject()) {
+          continue;
+        }
+        if (!el.HasMember("column_opx") || !el["column_opx"].IsInt()) {
+          continue;
+        }
+        IndexElementDef elem{};
+        elem.column_opx = el["column_opx"].GetInt();
+        if (el.HasMember("ordinal_position") && el["ordinal_position"].IsInt()) {
+          elem.ordinal_position = el["ordinal_position"].GetInt();
+        }
+        if (el.HasMember("length") && el["length"].IsUint()) {
+          elem.length = el["length"].GetUint();
+        }
+        if (el.HasMember("hidden") && el["hidden"].IsBool()) {
+          elem.hidden = el["hidden"].GetBool();
+        }
+        def.elements.push_back(elem);
+      }
+    }
+
+    if (!def.name.empty() && !def.elements.empty()) {
+      g_index_defs.push_back(std::move(def));
+    }
   }
 
-  if (!primary) {
+  return !g_index_defs.empty();
+}
+
+static bool parse_index_selector(const std::string& selector, uint64_t* out) {
+  if (selector.empty() || out == nullptr) {
     return false;
   }
-  if (!primary->HasMember("elements") || !(*primary)["elements"].IsArray()) {
+  char* end = nullptr;
+  errno = 0;
+  unsigned long long val = std::strtoull(selector.c_str(), &end, 10);
+  if (errno != 0 || end == selector.c_str() || *end != '\0') {
+    return false;
+  }
+  *out = static_cast<uint64_t>(val);
+  return true;
+}
+
+bool has_sdi_index_definitions() {
+  return !g_index_defs.empty();
+}
+
+void print_sdi_indexes(FILE* out) {
+  if (!out) {
+    return;
+  }
+  if (g_index_defs.empty()) {
+    fprintf(out, "No indexes found in SDI.\n");
+    return;
+  }
+  fprintf(out, "Indexes in SDI:\n");
+  for (const auto& idx : g_index_defs) {
+    fprintf(out, "  - %s (id=%llu root=%u fields=%zu)\n",
+            idx.name.c_str(),
+            static_cast<unsigned long long>(idx.id),
+            static_cast<unsigned int>(idx.root),
+            idx.elements.size());
+  }
+}
+
+bool select_index_for_parsing(const std::string& selector, std::string* error) {
+  if (g_index_defs.empty()) {
+    if (error) {
+      *error = "SDI does not contain index definitions";
+    }
     return false;
   }
 
-  std::vector<IndexElement> elems;
-  for (auto& el : (*primary)["elements"].GetArray()) {
-    if (!el.IsObject()) {
-      continue;
-    }
-    if (!el.HasMember("column_opx") || !el["column_opx"].IsInt()) {
-      continue;
-    }
-    IndexElement elem;
-    elem.column_opx = el["column_opx"].GetInt();
-    if (el.HasMember("ordinal_position") && el["ordinal_position"].IsInt()) {
-      elem.ordinal_position = el["ordinal_position"].GetInt();
-    }
-    elems.push_back(elem);
+  std::string sel = selector;
+  if (sel.empty()) {
+    sel = "PRIMARY";
   }
 
-  if (elems.empty()) {
+  const IndexDef* chosen = nullptr;
+  uint64_t numeric_id = 0;
+  if (parse_index_selector(sel, &numeric_id)) {
+    chosen = find_index_by_id(numeric_id);
+  }
+  if (!chosen) {
+    chosen = find_index_by_name(sel);
+  }
+
+  if (!chosen) {
+    if (error) {
+      *error = "Requested index '" + sel + "' not found in SDI";
+    }
     return false;
   }
 
-  std::sort(elems.begin(), elems.end(),
-            [](const IndexElement& a, const IndexElement& b) {
-              return a.ordinal_position < b.ordinal_position;
-            });
-
-  out_order.clear();
-  out_order.reserve(elems.size());
-  for (const auto& elem : elems) {
-    out_order.push_back(elem.column_opx);
+  if (!build_index_columns(*chosen, &g_columns)) {
+    if (error) {
+      *error = "Failed to build columns for index '" + chosen->name + "'";
+    }
+    return false;
   }
 
-  return !out_order.empty();
+  g_target_index_name = chosen->name;
+  g_target_index_root = chosen->root;
+  if (chosen->id != 0) {
+    set_target_index_id(chosen->id);
+  } else {
+    g_found_target = false;
+  }
+
+  return true;
+}
+
+page_no_t selected_index_root() {
+  return g_target_index_root;
+}
+
+const std::string& selected_index_name() {
+  return g_target_index_name;
+}
+
+bool target_index_is_set() {
+  return g_found_target;
+}
+
+void set_target_index_id_from_value(uint64_t id) {
+  set_target_index_id(id);
 }
 
 // If you used "my_rec_offs_*" from the "undrop" style code:
@@ -558,16 +746,16 @@ void debug_print_compact_row(const page_t* page,
 }
 
 /**
- * discover_primary_index_id():
+ * discover_target_index_id():
  *   Scans all pages to find the *first* root page
  *   (FIL_PAGE_INDEX + btr_root_fseg_validate() checks).
  *   Once found, read PAGE_INDEX_ID from that page
- *   and store in g_primary_index_id. 
+ *   and store in g_target_index_id. 
  *
  *   Returns 0 if success, non-0 if error.
  */
 
-int discover_primary_index_id(int fd)
+int discover_target_index_id(int fd)
 {
 
   // Determine page size via MySQL helper
@@ -632,12 +820,10 @@ int discover_primary_index_id(int fd)
       if (is_root) {
         // We consider the *first* root we find as the "Primary index"
         uint64_t idx_id_64 = read_uint64_from_page(page_data + PAGE_HEADER + PAGE_INDEX_ID);
-        g_primary_index_id.high = static_cast<uint32_t>(idx_id_64 >> 32);
-        g_primary_index_id.low  = static_cast<uint32_t>(idx_id_64 & 0xffffffff);
+        set_target_index_id(idx_id_64);
 
-        g_found_primary = true;
-        fprintf(stderr, "discover_primary_index_id: Found primary root at page=%d  index_id=%u:%u\n",
-                i, g_primary_index_id.high, g_primary_index_id.low);
+        fprintf(stderr, "discover_target_index_id: Found root at page=%d  index_id=%u:%u\n",
+                i, g_target_index_id.high, g_target_index_id.low);
 
         // done
         return 0;
@@ -646,14 +832,14 @@ int discover_primary_index_id(int fd)
   }
 
   // if we got here, we never found a root => maybe the table is empty or corrupted
-  fprintf(stderr, "discover_primary_index_id: No root page found => can't identify primary.\n");
+  fprintf(stderr, "discover_target_index_id: No root page found.\n");
   return 1;
 }
 
-bool is_primary_index(const unsigned char* page)
+bool is_target_index(const unsigned char* page)
 {
-  if (!g_found_primary) {
-    // We never discovered the primary => default to false
+  if (!g_found_target) {
+    // We never discovered the target index => default to false
     return false;
   }
 
@@ -661,7 +847,7 @@ bool is_primary_index(const unsigned char* page)
   uint32_t high = static_cast<uint32_t>(page_index_id >> 32);
   uint32_t low  = static_cast<uint32_t>(page_index_id & 0xffffffff);
 
-  return (high == g_primary_index_id.high && low == g_primary_index_id.low);
+  return (high == g_target_index_id.high && low == g_target_index_id.low);
 }
 
 static std::string to_lower_copy(const std::string& in) {
@@ -669,6 +855,60 @@ static std::string to_lower_copy(const std::string& in) {
   std::transform(out.begin(), out.end(), out.begin(),
                  [](unsigned char c) { return std::tolower(c); });
   return out;
+}
+
+static std::unordered_map<std::string, std::string> parse_kv_string(
+    const std::string& input) {
+  std::unordered_map<std::string, std::string> out;
+  size_t pos = 0;
+  while (pos < input.size()) {
+    const size_t end = input.find(';', pos);
+    const size_t len = (end == std::string::npos) ? input.size() - pos : end - pos;
+    if (len > 0) {
+      const std::string token = input.substr(pos, len);
+      const size_t eq = token.find('=');
+      if (eq != std::string::npos) {
+        const std::string key = token.substr(0, eq);
+        const std::string value = token.substr(eq + 1);
+        if (!key.empty()) {
+          out[key] = value;
+        }
+      } else if (!token.empty()) {
+        out[token] = "";
+      }
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    pos = end + 1;
+  }
+  return out;
+}
+
+static bool parse_uint64_value(const std::string& s, uint64_t* out) {
+  if (s.empty() || out == nullptr) {
+    return false;
+  }
+  char* end = nullptr;
+  errno = 0;
+  unsigned long long v = std::strtoull(s.c_str(), &end, 10);
+  if (errno != 0 || end == s.c_str()) {
+    return false;
+  }
+  *out = static_cast<uint64_t>(v);
+  return true;
+}
+
+static bool parse_uint32_value(const std::string& s, uint32_t* out) {
+  uint64_t tmp = 0;
+  if (!parse_uint64_value(s, &tmp) ||
+      tmp > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  if (out != nullptr) {
+    *out = static_cast<uint32_t>(tmp);
+  }
+  return true;
 }
 
 static uint64_t read_be_uint(const unsigned char* ptr, size_t len) {
@@ -795,6 +1035,13 @@ static void set_var(field_def_t* fld, unsigned int max_len) {
   fld->fixed_length = 0;
   fld->min_length = 0;
   fld->max_length = max_len;
+}
+
+static unsigned int clamp_var_max(unsigned int default_len, uint32_t col_len) {
+  if (col_len > 0 && col_len < default_len) {
+    return static_cast<unsigned int>(col_len);
+  }
+  return default_len;
 }
 
 static bool is_internal_column_name(const std::string& name) {
@@ -986,35 +1233,35 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
 
         } else if (type.find("tinytext") != std::string::npos) {
             fld->type = FT_TEXT;
-            set_var(fld, 255);
+            set_var(fld, clamp_var_max(255, col.char_length));
 
         } else if (type.find("mediumtext") != std::string::npos) {
             fld->type = FT_TEXT;
-            set_var(fld, 16777215);
+            set_var(fld, clamp_var_max(16777215, col.char_length));
 
         } else if (type.find("longtext") != std::string::npos) {
             fld->type = FT_TEXT;
-            set_var(fld, 0xFFFFFFFFu);
+            set_var(fld, clamp_var_max(0xFFFFFFFFu, col.char_length));
 
         } else if (type.find("text") != std::string::npos) {
             fld->type = FT_TEXT;
-            set_var(fld, 65535);
+            set_var(fld, clamp_var_max(65535, col.char_length));
 
         } else if (type.find("tinyblob") != std::string::npos) {
             fld->type = FT_BLOB;
-            set_var(fld, 255);
+            set_var(fld, clamp_var_max(255, col.char_length));
 
         } else if (type.find("mediumblob") != std::string::npos) {
             fld->type = FT_BLOB;
-            set_var(fld, 16777215);
+            set_var(fld, clamp_var_max(16777215, col.char_length));
 
         } else if (type.find("longblob") != std::string::npos) {
             fld->type = FT_BLOB;
-            set_var(fld, 0xFFFFFFFFu);
+            set_var(fld, clamp_var_max(0xFFFFFFFFu, col.char_length));
 
         } else if (type.find("blob") != std::string::npos) {
             fld->type = FT_BLOB;
-            set_var(fld, 65535);
+            set_var(fld, clamp_var_max(65535, col.char_length));
 
         } else if (type.find("enum") != std::string::npos) {
             fld->type = FT_ENUM;
@@ -1031,11 +1278,11 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
 
         } else if (type.find("json") != std::string::npos) {
             fld->type = FT_JSON;
-            set_var(fld, 0xFFFFFFFFu);
+            set_var(fld, clamp_var_max(0xFFFFFFFFu, col.char_length));
 
         } else if (type.find("geometry") != std::string::npos) {
             fld->type = FT_BLOB;
-            set_var(fld, 0xFFFFFFFFu);
+            set_var(fld, clamp_var_max(0xFFFFFFFFu, col.char_length));
 
         } else {
             fld->type = FT_TEXT;
@@ -1102,25 +1349,28 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
 int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
 {
     // 1) Open the file
-    std::ifstream ifs(json_path);
-    if (!ifs.is_open()) {
+    FILE* fp = std::fopen(json_path, "rb");
+    if (!fp) {
         std::cerr << "[Error] Could not open JSON file: " << json_path << std::endl;
         return 1;
     }
 
     // 2) Parse the top-level JSON
-    rapidjson::IStreamWrapper isw(ifs);
+    char read_buffer[1 << 16];
+    rapidjson::FileReadStream isw(fp, read_buffer, sizeof(read_buffer));
     rapidjson::Document d;
     d.ParseStream(isw);
     if (d.HasParseError()) {
         std::cerr << "[Error] JSON parse error: " 
                   << rapidjson::GetParseError_En(d.GetParseError())
                   << " at offset " << d.GetErrorOffset() << std::endl;
+        std::fclose(fp);
         return 1;
     }
 
     if (!d.IsArray()) {
         std::cerr << "[Error] Top-level JSON is not an array.\n";
+        std::fclose(fp);
         return 1;
     }
 
@@ -1152,6 +1402,7 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
 
     if (!table_obj) {
         std::cerr << "[Error] Could not find any array element with dd_object_type=='Table'.\n";
+        std::fclose(fp);
         return 1;
     }
 
@@ -1159,6 +1410,7 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
     //    i.e. table_obj->HasMember("dd_object") => columns in table_obj["dd_object"]["columns"]
     if (!table_obj->HasMember("dd_object")) {
         std::cerr << "[Error] Table object is missing 'dd_object' member.\n";
+        std::fclose(fp);
         return 1;
     }
     const rapidjson::Value& dd_obj = (*table_obj)["dd_object"];
@@ -1174,6 +1426,7 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
 
     if (!dd_obj.HasMember("columns") || !dd_obj["columns"].IsArray()) {
         std::cerr << "[Error] 'dd_object' is missing 'columns' array.\n";
+        std::fclose(fp);
         return 1;
     }
 
@@ -1262,23 +1515,14 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
                   << "\n";
     }
 
-    std::vector<int> primary_order;
-    if (build_primary_index_order(dd_obj, primary_order)) {
-        for (int opx : primary_order) {
-            if (opx < 0 || opx >= static_cast<int>(g_columns_by_opx.size())) {
-                std::cerr << "[Warn] PRIMARY index refers to invalid column_opx="
-                          << opx << "\n";
-                continue;
-            }
-            const MyColumnDef& col = g_columns_by_opx[opx];
-            if (col.is_virtual) {
-                continue;
-            }
-            g_columns.push_back(col);
-        }
-        if (!g_columns.empty()) {
+    bool have_indexes = parse_index_defs(dd_obj);
+    if (have_indexes) {
+        std::string err;
+        if (select_index_for_parsing("PRIMARY", &err) && !g_columns.empty()) {
             std::cout << "[Debug] Using PRIMARY index order for record parsing ("
                       << g_columns.size() << " columns).\n";
+        } else {
+            std::cerr << "[Warn] PRIMARY index order not found: " << err << "\n";
         }
     }
 
@@ -1304,7 +1548,7 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
         std::cout << "[Warn] PRIMARY index order not found; using ordinal_position order.\n";
     }
 
-    ifs.close();
+    std::fclose(fp);
     return 0;
 }
 
@@ -1354,9 +1598,9 @@ void parse_records_on_page(const unsigned char* page,
                            size_t page_size,
                            uint64_t page_no)
 {
-  // 1) Check if this page belongs to the primary index
-  if (!is_primary_index(page)) {
-    return; // Not primary => skip
+  // 1) Check if this page belongs to the selected index
+  if (!is_target_index(page)) {
+    return; // Not selected index => skip
   }
 
   // 2) Check if it’s a LEAF page
@@ -1366,8 +1610,9 @@ void parse_records_on_page(const unsigned char* page,
     return;
   }
 
-  std::cout << "Page " << page_no 
-            << " is primary index leaf. Parsing records.\n";
+  std::cout << "Page " << page_no
+            << " is index '" << g_target_index_name
+            << "' leaf. Parsing records.\n";
 
   // 3) Check if COMPACT or REDUNDANT
   bool is_compact = page_is_comp(page);

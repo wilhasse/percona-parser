@@ -134,11 +134,12 @@ if [ "$JSON_OUTPUT" != "true" ] || [ "$VERBOSE" = "true" ]; then
     echo "4. Type decoding (DECIMAL, DATE, TIME, ENUM, SET)"
     echo "5. Charset-aware decoding (latin1 + utf8mb4)"
     echo "6. JSON binary decoding (JSON columns)"
-    echo "7. LOB external decoding (LONGTEXT, LONGBLOB)"
-    echo "8. ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)"
-    echo "9. SDI rebuild (Mode 5 with --sdi-json)"
-    echo "10. SDI external rebuild (external SDI BLOB pages)"
-    echo "11. CFG import (instant columns via --cfg-out)"
+    echo "7. Secondary index parsing (index selection)"
+    echo "8. LOB external decoding (LONGTEXT, LONGBLOB)"
+    echo "9. ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)"
+    echo "10. SDI rebuild (Mode 5 with --sdi-json)"
+    echo "11. SDI external rebuild (external SDI BLOB pages)"
+    echo "12. CFG import (instant columns via --cfg-out)"
     echo ""
     if [ "$VERBOSE" = "true" ]; then
         echo -e "${CYAN}Verbose mode enabled - showing real-time output${NC}"
@@ -256,7 +257,16 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
-# Test 7: LOB external decoding (LONGTEXT, LONGBLOB)
+# Test 7: Secondary index parsing (index selection)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "SECONDARY_INDEX" "$SCRIPT_DIR/test_secondary_index.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+[ "$JSON_OUTPUT" != "true" ] && echo ""
+
+# Test 8: LOB external decoding (LONGTEXT, LONGBLOB)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "LOB_DECODING" "$SCRIPT_DIR/test_lob_decode.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
@@ -265,7 +275,7 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
-# Test 8: ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)
+# Test 9: ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "ZLOB_DECODING" "$SCRIPT_DIR/test_zlob_decode.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
@@ -274,7 +284,7 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
-# Test 9: SDI rebuild (Mode 5 with --sdi-json)
+# Test 10: SDI rebuild (Mode 5 with --sdi-json)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "SDI_REBUILD" "$SCRIPT_DIR/test_sdi_rebuild.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
@@ -283,7 +293,7 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
-# Test 10: SDI external rebuild (external SDI BLOB pages)
+# Test 11: SDI external rebuild (external SDI BLOB pages)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "SDI_EXTERNAL" "$SCRIPT_DIR/test_sdi_external.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
@@ -292,7 +302,7 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
-# Test 11: CFG import (instant columns via --cfg-out)
+# Test 12: CFG import (instant columns via --cfg-out)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "CFG_IMPORT" "$SCRIPT_DIR/test_cfg_import.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))

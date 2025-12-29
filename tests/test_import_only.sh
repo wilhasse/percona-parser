@@ -52,7 +52,7 @@ else
     else
         echo "Running full test to create compressed file..."
         cd "$PARSER_DIR"
-        ./tests/test_compressed.sh
+        KEEP_FILES=1 ./tests/test_compressed.sh
     fi
     sudo cp tests/ibd_files/test_compressed_decompressed.ibd /var/lib/mysql/test_rowformat/test_table.ibd  
     sudo chown mysql:mysql /var/lib/mysql/test_rowformat/test_table.ibd

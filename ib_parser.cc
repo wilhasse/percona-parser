@@ -77,6 +77,55 @@ struct XdesCache {
   }
 };
 
+static bool read_index_id_from_root(int fd, page_no_t root, uint64_t* out) {
+  if (root == FIL_NULL || out == nullptr) {
+    return false;
+  }
+
+  File mfd = (File)fd;
+  page_size_t pg_sz(0, 0, false);
+  if (!determine_page_size(mfd, pg_sz)) {
+    return false;
+  }
+
+  const size_t physical_size = pg_sz.physical();
+  const size_t logical_size = pg_sz.logical();
+  const bool tablespace_compressed = (physical_size < logical_size);
+
+  std::vector<unsigned char> page_buf(physical_size);
+  std::vector<unsigned char> logical_buf;
+  if (tablespace_compressed) {
+    logical_buf.resize(logical_size);
+  }
+
+  const off_t offset = static_cast<off_t>(root) *
+                       static_cast<off_t>(physical_size);
+  if (pread(fd, page_buf.data(), physical_size, offset) !=
+      static_cast<ssize_t>(physical_size)) {
+    return false;
+  }
+
+  const unsigned char* page_data = page_buf.data();
+  if (tablespace_compressed) {
+    size_t actual_size = 0;
+    if (!decompress_page_inplace(page_buf.data(), physical_size, logical_size,
+                                 logical_buf.data(), logical_size, &actual_size)) {
+      return false;
+    }
+    if (actual_size != logical_size) {
+      return false;
+    }
+    page_data = logical_buf.data();
+  }
+
+  if (fil_page_get_type(page_data) != FIL_PAGE_INDEX) {
+    return false;
+  }
+
+  *out = mach_read_from_8(page_data + PAGE_HEADER + PAGE_INDEX_ID);
+  return true;
+}
+
 // We assume a fixed 16K buffer for reading page 0, 
 // since the maximum InnoDB page size is 16K in many setups.
 // (If you allow 32K or 64K pages, you’ll need a bigger buffer.)
@@ -131,7 +180,8 @@ static void usage() {
             << "Examples:\n"
             << "  ib_parser 1 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 2 <in_file.ibd> <out_file>\n"
-            << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n"
+            << "  ib_parser 3 <in_file.ibd> <table_def.json> [--index=NAME|ID] [--list-indexes]\n"
+            << "    [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n"
             << "  ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 5 <in_file.ibd> <out_file>\n"
             << std::endl;
@@ -309,13 +359,17 @@ static int do_parse_main(int argc, char** argv)
 {
   if (argc < 3) {
     std::cerr << "Usage for mode=3 (parse-only):\n"
-              << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n";
+              << "  ib_parser 3 <in_file.ibd> <table_def.json> [--index=NAME|ID] [--list-indexes]\n"
+              << "    [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n";
     return 1;
   }
 
   const char* in_file = argv[1];
   const char* json_file = argv[2];
   const char* out_path = nullptr;
+  std::string index_selector;
+  bool index_selector_explicit = false;
+  bool list_indexes = false;
   RowOutputOptions output_opts;
   output_opts.format = ROW_OUTPUT_PIPE;
   output_opts.include_meta = false;
@@ -325,6 +379,24 @@ static int do_parse_main(int argc, char** argv)
     std::string arg = argv[i];
     if (arg == "--with-meta") {
       output_opts.include_meta = true;
+      continue;
+    }
+    if (arg == "--list-indexes") {
+      list_indexes = true;
+      continue;
+    }
+    if (arg.rfind("--index=", 0) == 0) {
+      index_selector = arg.substr(std::strlen("--index="));
+      index_selector_explicit = true;
+      continue;
+    }
+    if (arg == "--index") {
+      if (i + 1 >= argc) {
+        std::cerr << "--index requires a value\n";
+        return 1;
+      }
+      index_selector = argv[++i];
+      index_selector_explicit = true;
       continue;
     }
     if (arg.rfind("--format=", 0) == 0) {
@@ -396,6 +468,22 @@ static int do_parse_main(int argc, char** argv)
     return 1;
   }
 
+  if (list_indexes) {
+    print_sdi_indexes(stdout);
+    return 0;
+  }
+
+  if (has_sdi_index_definitions()) {
+    std::string err;
+    if (!select_index_for_parsing(index_selector, &err)) {
+      std::cerr << "Index selection failed: " << err << "\n";
+      return 1;
+    }
+  } else if (index_selector_explicit) {
+    std::cerr << "Index selection requires SDI index metadata.\n";
+    return 1;
+  }
+
   // Build a table_def_t from g_columns
   static table_def_t my_table;
   if (build_table_def_from_json(&my_table, table_name.c_str()) != 0) {
@@ -412,18 +500,37 @@ static int do_parse_main(int argc, char** argv)
   my_init();
   my_thread_init();
 
-  // 2) *** DISCOVER PRIMARY INDEX ID *** using system "open + pread" approach
+  // 2) Resolve selected index ID using system "open + pread" approach
   int sys_fd = ::open(in_file, O_RDONLY);
   if (sys_fd < 0) {
     perror("open");
     return 1;
   }
-  if (discover_primary_index_id(sys_fd) != 0) {
-    std::cerr << "Could not discover primary index from " << in_file << std::endl;
-    ::close(sys_fd);
-    my_thread_end();
-    my_end(0);
-    return 1;
+
+  if (!target_index_is_set()) {
+    page_no_t root = selected_index_root();
+    uint64_t idx_id = 0;
+    if (root != FIL_NULL && read_index_id_from_root(sys_fd, root, &idx_id)) {
+      set_target_index_id_from_value(idx_id);
+    }
+  }
+
+  if (!target_index_is_set()) {
+    if (index_selector_explicit && has_sdi_index_definitions()) {
+      std::cerr << "Could not resolve index id for selected index '"
+                << selected_index_name() << "'.\n";
+      ::close(sys_fd);
+      my_thread_end();
+      my_end(0);
+      return 1;
+    }
+    if (discover_target_index_id(sys_fd) != 0) {
+      std::cerr << "Could not discover index from " << in_file << std::endl;
+      ::close(sys_fd);
+      my_thread_end();
+      my_end(0);
+      return 1;
+    }
   }
 
   // 3) Now open the file with MySQL's my_open

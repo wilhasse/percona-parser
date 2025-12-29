@@ -13,6 +13,7 @@ This directory contains test scripts for validating the ib_parser tool's functio
 | `test_types_decode.sh` | ✅ **Working** | Generates fixture and validates type decoding | MySQL 8.0+ + ibd2sdi |
 | `test_charset_decode.sh` | ✅ **Working** | Validates charset-aware decoding for UTF-8/latin1 text | MySQL 8.0+ + ibd2sdi |
 | `test_json_decode.sh` | ✅ **Working** | Validates JSON binary decoding for JSON columns | MySQL 8.0+ + ibd2sdi |
+| `test_secondary_index.sh` | ✅ **Working** | Validates secondary index parsing with `--index` | MySQL 8.0+ + ibd2sdi |
 | `test_lob_decode.sh` | ✅ **Working** | Validates external LOB (TEXT/BLOB) reconstruction | MySQL 8.0+ + ibd2sdi |
 | `test_zlob_decode.sh` | ✅ **Working** | Validates compressed LOB (ZLOB) reconstruction | MySQL 8.0+ + ibd2sdi |
 | `test_sdi_rebuild.sh` | ✅ **Working** | Mode 5 rebuild with SDI for MySQL import | MySQL 8.0+ + ibd2sdi |

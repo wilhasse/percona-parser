@@ -37,6 +37,8 @@ The JSON is used as the schema source for percona-parser.
 
 ```bash
 ./build/ib_parser 3 mytable.ibd mytable_sdi.json --format=jsonl --output=rows.jsonl
+./build/ib_parser 3 mytable.ibd mytable_sdi.json --index=idx_ab --format=jsonl
+./build/ib_parser 3 mytable.ibd mytable_sdi.json --list-indexes
 ```
 
 Helpful flags:
@@ -116,19 +118,20 @@ mysql -uroot test_import -e "ALTER TABLE mytable IMPORT TABLESPACE;"
    * Rebuilding SDI requires correct record headers and directory slots.
 6. **External SDI BLOB pages are handled**
    * Rebuild emits SDI BLOB pages when the SDI record does not fit in-page.
-7. **Only clustered index rows are parsed**
-   * Secondary indexes are not parsed or reconstructed.
+7. **Secondary indexes are supported**
+   * Use `--index=NAME|ID` to parse a secondary index; default is PRIMARY.
 
 # Current Capabilities Summary
 
 * Decrypt, decompress, and parse clustered index leaf rows.
 * Decode LOB/ZLOB, JSON binary, charset-aware text, DATETIME.
 * Rebuild compressed tablespaces to 16KB with SDI restored (in-page or external).
+* Parse PRIMARY or secondary index leaf records via `--index`.
 
 # Open Work / Next Steps
 
 * Harden .cfg generation for instant/row-version edge cases.
-* Add secondary index parsing or reconstruction.
+* Add secondary index reconstruction for import.
 * Improve diagnostics for index-id mismatches during import.
 
 # References in the repo

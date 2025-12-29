@@ -56,8 +56,8 @@ Key Functions:
 Purpose: Declarations for parsing InnoDB pages and records
 Key Functions:
   - parse_records_on_page(): Parse records from a data page
-  - discover_primary_index_id(): Find primary index ID
-  - is_primary_index(): Check if page belongs to primary index
+  - discover_target_index_id(): Find selected index ID
+  - is_target_index(): Check if page belongs to selected index
   - load_ib2sdi_table_columns(): Load table schema from JSON
   - build_table_def_from_json(): Build table definition structure
   - debug_print_table_def(): Debug output for table structure

@@ -36,7 +36,7 @@ Run with JSON output:
 
 ## Test Suite Overview
 
-The test suite (`tests/run_all_tests.sh`) runs 11 comprehensive tests:
+The test suite (`tests/run_all_tests.sh`) runs 12 comprehensive tests:
 
 | # | Test Name | Script | Description |
 |---|-----------|--------|-------------|
@@ -46,11 +46,12 @@ The test suite (`tests/run_all_tests.sh`) runs 11 comprehensive tests:
 | 4 | TYPE_DECODING | `test_types_decode.sh` | DECIMAL, DATE, TIME, ENUM, SET parsing |
 | 5 | CHARSET_DECODING | `test_charset_decode.sh` | latin1 + utf8mb4 text decoding |
 | 6 | JSON_DECODING | `test_json_decode.sh` | JSON binary column parsing |
-| 7 | LOB_DECODING | `test_lob_decode.sh` | LONGTEXT/LONGBLOB external pages |
-| 8 | ZLOB_DECODING | `test_zlob_decode.sh` | Compressed LOB (ROW_FORMAT=COMPRESSED) |
-| 9 | SDI_REBUILD | `test_sdi_rebuild.sh` | Mode 5 full rebuild with SDI for MySQL import |
-| 10 | SDI_EXTERNAL | `test_sdi_external.sh` | SDI rebuild with external SDI BLOB pages |
-| 11 | CFG_IMPORT | `test_cfg_import.sh` | Generate .cfg from SDI for instant-column import |
+| 7 | SECONDARY_INDEX | `test_secondary_index.sh` | Secondary index parsing + index selection |
+| 8 | LOB_DECODING | `test_lob_decode.sh` | LONGTEXT/LONGBLOB external pages |
+| 9 | ZLOB_DECODING | `test_zlob_decode.sh` | Compressed LOB (ROW_FORMAT=COMPRESSED) |
+| 10 | SDI_REBUILD | `test_sdi_rebuild.sh` | Mode 5 full rebuild with SDI for MySQL import |
+| 11 | SDI_EXTERNAL | `test_sdi_external.sh` | SDI rebuild with external SDI BLOB pages |
+| 12 | CFG_IMPORT | `test_cfg_import.sh` | Generate .cfg from SDI for instant-column import |
 
 ## Individual Test Details
 
@@ -117,7 +118,15 @@ Tests MySQL JSON binary format parsing (RES-31).
 - Nested structures
 - Various JSON value types (string, number, boolean, null)
 
-### 7. LOB Decoding (`test_lob_decode.sh`)
+### 7. Secondary Index (`test_secondary_index.sh`)
+
+Validates secondary index parsing using `--index`.
+
+**What it tests**:
+- Parses a non-PRIMARY index (idx_ab)
+- Confirms output matches MySQL ordering for index columns
+
+### 8. LOB Decoding (`test_lob_decode.sh`)
 
 Tests external LOB page parsing for DYNAMIC tables.
 
@@ -126,7 +135,7 @@ Tests external LOB page parsing for DYNAMIC tables.
 - LONGBLOB columns with binary data
 - External page traversal (first page + data pages)
 
-### 8. ZLOB Decoding (`test_zlob_decode.sh`)
+### 9. ZLOB Decoding (`test_zlob_decode.sh`)
 
 Tests compressed LOB parsing for COMPRESSED tables.
 
@@ -135,7 +144,7 @@ Tests compressed LOB parsing for COMPRESSED tables.
 - Compressed external data pages
 - zlib decompression of LOB data
 
-### 9. SDI Rebuild (`test_sdi_rebuild.sh`)
+### 10. SDI Rebuild (`test_sdi_rebuild.sh`)
 
 Tests Mode 5 experimental full rebuild with `--sdi-json` flag (RES-22).
 
@@ -148,7 +157,7 @@ Tests Mode 5 experimental full rebuild with `--sdi-json` flag (RES-22).
 
 **Expected result**: All 55 test rows recovered and queryable.
 
-### 10. SDI External (`test_sdi_external.sh`)
+### 11. SDI External (`test_sdi_external.sh`)
 
 Validates SDI rebuild when SDI data is stored externally (SDI BLOB pages).
 
@@ -158,7 +167,7 @@ Validates SDI rebuild when SDI data is stored externally (SDI BLOB pages).
 - Verify `ibd2sdi` reads the rebuilt file
 - Confirm SDI BLOB pages via `innochecksum -S`
 
-### 11. CFG Import (`test_cfg_import.sh`)
+### 12. CFG Import (`test_cfg_import.sh`)
 
 Validates `.cfg` generation with instant columns and `IMPORT TABLESPACE`.
 
@@ -185,8 +194,8 @@ Running: ENCRYPTED_TABLES
 ==========================================
 TEST SUITE SUMMARY
 ==========================================
-Total tests run: 11
-Passed: 11
+Total tests run: 12
+Passed: 12
 Failed: 0
 Duration: 180s
 
@@ -236,6 +245,7 @@ cat tests/logs/FAILED_TEST_*.log
 ./tests/test_compressed.sh
 ./tests/test_sdi_rebuild.sh
 ./tests/test_sdi_external.sh
+./tests/test_secondary_index.sh
 
 # Run with environment variable for verbose output
 VERBOSE=1 ./tests/test_types_decode.sh

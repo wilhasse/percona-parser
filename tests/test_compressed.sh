@@ -200,8 +200,12 @@ else
 fi
 
 echo -e "${YELLOW}Step 12: Cleanup${NC}"
-rm -f "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_compressed.ibd"
-rm -f "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_decompressed.ibd"
+if [ "${KEEP_FILES:-0}" != "1" ]; then
+    rm -f "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_compressed.ibd"
+    rm -f "$PARSER_DIR/tests/ibd_files/${TABLE_NAME}_decompressed.ibd"
+else
+    echo "Keeping decompressed files in tests/ibd_files (KEEP_FILES=1)"
+fi
 
 echo -e "${GREEN}Compressed table test completed!${NC}"
 echo "Databases '$DB_NAME' and '$IMPORT_DB_NAME' kept for inspection. Drop them manually if needed."
