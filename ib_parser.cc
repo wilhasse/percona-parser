@@ -17,6 +17,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <unistd.h>
 
 // MySQL/Percona, OpenSSL, etc.
 #include <my_sys.h>
@@ -34,6 +35,8 @@
 #include "page0size.h"  // Add this for page_size_t
 #include "fil0fil.h"      // for fsp_header_get_flags()
 #include "fsp0fsp.h"      // for fsp_flags_is_valid(), etc.
+#include "fsp0types.h"
+#include "mach0data.h"
 
 
 // Your headers that declare "decrypt_page_inplace()", "decompress_page_inplace()",
@@ -41,6 +44,37 @@
 #include "decrypt.h"     // Contains e.g. decrypt_page_inplace(), get_master_key() ...
 #include "decompress.h"  // Contains e.g. decompress_page_inplace(), etc.
 #include "parser.h"      // Contains parser logic
+
+struct XdesCache {
+  page_no_t page_no = FIL_NULL;
+  std::unique_ptr<unsigned char[]> buf;
+  size_t buf_size = 0;
+
+  void update(page_no_t new_page_no, const unsigned char* page, size_t size) {
+    if (!buf || buf_size != size) {
+      buf.reset(new unsigned char[size]);
+      buf_size = size;
+    }
+    std::memcpy(buf.get(), page, size);
+    page_no = new_page_no;
+  }
+
+  bool is_free(page_no_t target, const page_size_t& page_sz) const {
+    if (!buf || page_no == FIL_NULL) {
+      return false;
+    }
+
+    if (xdes_calc_descriptor_page(page_sz, target) != page_no) {
+      return false;
+    }
+
+    const auto* descr = reinterpret_cast<const xdes_t*>(
+        buf.get() + XDES_ARR_OFFSET +
+        XDES_SIZE * xdes_calc_descriptor_index(page_sz, target));
+    const page_no_t pos = target % FSP_EXTENT_SIZE;
+    return xdes_get_bit(descr, XDES_FREE_BIT, pos);
+  }
+};
 
 // We assume a fixed 16K buffer for reading page 0, 
 // since the maximum InnoDB page size is 16K in many setups.
@@ -281,26 +315,24 @@ static int do_parse_main(int argc, char** argv)
   my_thread_init();
 
   // 2) *** DISCOVER PRIMARY INDEX ID *** using system "open + pread" approach
-  {
-    int sys_fd = ::open(in_file, O_RDONLY);
-    if (sys_fd < 0) {
-      perror("open");
-      return 1;
-    }
-    if (discover_primary_index_id(sys_fd) != 0) {
-      std::cerr << "Could not discover primary index from " << in_file << std::endl;
-      ::close(sys_fd);
-      my_thread_end();
-      my_end(0);
-      return 1;
-    }
+  int sys_fd = ::open(in_file, O_RDONLY);
+  if (sys_fd < 0) {
+    perror("open");
+    return 1;
+  }
+  if (discover_primary_index_id(sys_fd) != 0) {
+    std::cerr << "Could not discover primary index from " << in_file << std::endl;
     ::close(sys_fd);
+    my_thread_end();
+    my_end(0);
+    return 1;
   }
 
   // 3) Now open the file with MySQL's my_open
   File in_fd = my_open(in_file, O_RDONLY, MYF(0));
   if (in_fd < 0) {
     std::cerr << "Cannot open file " << in_file << std::endl;
+    ::close(sys_fd);
     my_thread_end();
     my_end(0);
     return 1;
@@ -311,16 +343,20 @@ static int do_parse_main(int argc, char** argv)
   if (!determine_page_size(in_fd, pg_sz)) {
     std::cerr << "Could not determine page size from " << in_file << "\n";
     my_close(in_fd, MYF(0));
+    ::close(sys_fd);
     my_thread_end();
     my_end(0);
     return 1;
   }
   const size_t physical_page_size = pg_sz.physical();
+  const size_t logical_page_size = pg_sz.logical();
+  const bool tablespace_compressed = (physical_page_size < logical_page_size);
 
   // 5) Rewind
   if (my_seek(in_fd, 0, MY_SEEK_SET, MYF(0)) == MY_FILEPOS_ERROR) {
     std::cerr << "Cannot seek to start of " << in_file << "\n";
     my_close(in_fd, MYF(0));
+    ::close(sys_fd);
     my_thread_end();
     my_end(0);
     return 1;
@@ -332,10 +368,30 @@ static int do_parse_main(int argc, char** argv)
   init_table_defs(1);
   debug_print_table_def(&my_table);
 
-  // 6) Allocate a buffer
+  // 7) Allocate buffers
   std::unique_ptr<unsigned char[]> page_buf(new unsigned char[physical_page_size]);
+  std::unique_ptr<unsigned char[]> logical_buf;
+  if (tablespace_compressed) {
+    logical_buf.reset(new unsigned char[logical_page_size]);
+  }
+  std::unique_ptr<unsigned char[]> xdes_scratch(new unsigned char[physical_page_size]);
+  XdesCache xdes_cache;
 
-  // 7) Page-by-page loop
+  auto load_xdes_page = [&](page_no_t target) -> void {
+    const page_no_t xdes_page = xdes_calc_descriptor_page(pg_sz, target);
+    if (xdes_page == FIL_NULL || xdes_cache.page_no == xdes_page) {
+      return;
+    }
+    const off_t offset = static_cast<off_t>(xdes_page) *
+                         static_cast<off_t>(physical_page_size);
+    const ssize_t read_bytes = pread(sys_fd, xdes_scratch.get(),
+                                     physical_page_size, offset);
+    if (read_bytes == static_cast<ssize_t>(physical_page_size)) {
+      xdes_cache.update(xdes_page, xdes_scratch.get(), physical_page_size);
+    }
+  };
+
+  // 8) Page-by-page loop
   uint64_t page_no = 0;
   while (true) {
     size_t rd = my_read(in_fd, page_buf.get(), physical_page_size, MYF(0));
@@ -348,20 +404,63 @@ static int do_parse_main(int argc, char** argv)
       break;
     }
 
-    // Check if page's index ID == primary
-    if (is_primary_index(page_buf.get())) {
-      // Now also check if it's a LEAF page
-      ulint page_level = mach_read_from_2(page_buf.get() + PAGE_HEADER + PAGE_LEVEL);
-      if (page_level == 0) {
-        // parse
-        parse_records_on_page(page_buf.get(), physical_page_size, page_no);
-      }
+    const uint32_t on_disk_page_no =
+        mach_read_from_4(page_buf.get() + FIL_PAGE_OFFSET);
+    if (on_disk_page_no != page_no) {
+      page_no++;
+      continue;
     }
+
+    const uint16_t page_type = mach_read_from_2(page_buf.get() + FIL_PAGE_TYPE);
+    if (page_type == FIL_PAGE_TYPE_XDES ||
+        page_type == FIL_PAGE_TYPE_FSP_HDR) {
+      xdes_cache.update(page_no, page_buf.get(), physical_page_size);
+    }
+
+    load_xdes_page(page_no);
+    if (xdes_cache.is_free(page_no, pg_sz)) {
+      page_no++;
+      continue;
+    }
+
+    if (page_type != FIL_PAGE_INDEX) {
+      page_no++;
+      continue;
+    }
+
+    const unsigned char* parse_buf = page_buf.get();
+    size_t parse_size = physical_page_size;
+    if (tablespace_compressed) {
+      size_t actual_size = 0;
+      if (!decompress_page_inplace(page_buf.get(),
+                                   physical_page_size,
+                                   logical_page_size,
+                                   logical_buf.get(),
+                                   logical_page_size,
+                                   &actual_size)) {
+        page_no++;
+        continue;
+      }
+      if (actual_size != logical_page_size) {
+        page_no++;
+        continue;
+      }
+      parse_buf = logical_buf.get();
+      parse_size = logical_page_size;
+    }
+
+    if (!page_is_comp(parse_buf)) {
+      page_no++;
+      continue;
+    }
+
+    parse_records_on_page(parse_buf, parse_size, page_no);
 
     page_no++;
   }
 
   my_close(in_fd, MYF(0));
+  ::close(sys_fd);
   my_thread_end();
   my_end(0);
 

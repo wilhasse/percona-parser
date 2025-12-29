@@ -26,6 +26,37 @@
 #include "undrop_for_innodb.h"
 #include "decompress.h"
 
+struct XdesCache {
+  page_no_t page_no = FIL_NULL;
+  std::unique_ptr<unsigned char[]> buf;
+  size_t buf_size = 0;
+
+  void update(page_no_t new_page_no, const unsigned char* page, size_t size) {
+    if (!buf || buf_size != size) {
+      buf.reset(new unsigned char[size]);
+      buf_size = size;
+    }
+    std::memcpy(buf.get(), page, size);
+    page_no = new_page_no;
+  }
+
+  bool is_free(page_no_t target, const page_size_t& page_sz) const {
+    if (!buf || page_no == FIL_NULL) {
+      return false;
+    }
+
+    if (xdes_calc_descriptor_page(page_sz, target) != page_no) {
+      return false;
+    }
+
+    const auto* descr = reinterpret_cast<const xdes_t*>(
+        buf.get() + XDES_ARR_OFFSET +
+        XDES_SIZE * xdes_calc_descriptor_index(page_sz, target));
+    const page_no_t pos = target % FSP_EXTENT_SIZE;
+    return xdes_get_bit(descr, XDES_FREE_BIT, pos);
+  }
+};
+
 /** A minimal column-definition struct */
 struct MyColumnDef {
     std::string name;            // e.g., "id", "name", ...
@@ -279,15 +310,21 @@ int discover_primary_index_id(int fd)
   File mfd = (File)fd;
   page_size_t pg_sz(0,0,false);
   if (!determine_page_size(mfd, pg_sz)) { fprintf(stderr, "Cannot read page size\n"); return 1; }
-  const size_t kPageSize = pg_sz.physical();
+  const size_t physical_size = pg_sz.physical();
+  const size_t logical_size = pg_sz.logical();
+  const bool tablespace_compressed = (physical_size < logical_size);
   // file size
   struct stat stat_buf;
   if (fstat(fd, &stat_buf) == -1) { perror("fstat"); return 1; }
   const off_t total = stat_buf.st_size;
-  const off_t block_num = total / (off_t)kPageSize;
+  const off_t block_num = total / (off_t)physical_size;
   if (block_num <= 0) { fprintf(stderr, "Empty file?\n"); return 1; }
-  std::vector<unsigned char> page_buf(kPageSize);
-  if (pread(fd, page_buf.data(), kPageSize, 0) != (ssize_t)kPageSize) {
+  std::vector<unsigned char> page_buf(physical_size);
+  std::vector<unsigned char> logical_buf;
+  if (tablespace_compressed) {
+    logical_buf.resize(logical_size);
+  }
+  if (pread(fd, page_buf.data(), physical_size, 0) != (ssize_t)physical_size) {
     perror("pread page0");
     return 1;
   }
@@ -295,22 +332,42 @@ int discover_primary_index_id(int fd)
 
   // 4) loop over each page
   for (int i = 0; i < block_num; i++) {
-    off_t offset = (off_t) i * kPageSize;
-    if (pread(fd, page_buf.data(), kPageSize, offset) != (ssize_t)kPageSize) {
+    off_t offset = (off_t) i * physical_size;
+    if (pread(fd, page_buf.data(), physical_size, offset) != (ssize_t)physical_size) {
       // partial read => break or return error
       break;
     }
 
     // check if FIL_PAGE_INDEX
     if (fil_page_get_type(page_buf.data()) == FIL_PAGE_INDEX) {
+      const unsigned char* page_data = page_buf.data();
+      if (tablespace_compressed) {
+        size_t actual_size = 0;
+        if (!decompress_page_inplace(page_buf.data(),
+                                     physical_size,
+                                     logical_size,
+                                     logical_buf.data(),
+                                     logical_size,
+                                     &actual_size)) {
+          continue;
+        }
+        if (actual_size != logical_size) {
+          continue;
+        }
+        page_data = logical_buf.data();
+      }
+      if (!page_is_comp(page_data)) {
+        continue;
+      }
+
       // Check if this is a *root* page (like ShowIndexSummary does)
       // by verifying the fseg headers for leaf and top
-      bool is_root = btr_root_fseg_validate(page_buf.data() + FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF, space_id)
-                  && btr_root_fseg_validate(page_buf.data() + FIL_PAGE_DATA + PAGE_BTR_SEG_TOP, space_id);
+      bool is_root = btr_root_fseg_validate(page_data + FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF, space_id)
+                  && btr_root_fseg_validate(page_data + FIL_PAGE_DATA + PAGE_BTR_SEG_TOP, space_id);
 
       if (is_root) {
         // We consider the *first* root we find as the "Primary index"
-        uint64_t idx_id_64 = read_uint64_from_page(page_buf.data() + PAGE_HEADER + PAGE_INDEX_ID);
+        uint64_t idx_id_64 = read_uint64_from_page(page_data + PAGE_HEADER + PAGE_INDEX_ID);
         g_primary_index_id.high = static_cast<uint32_t>(idx_id_64 >> 32);
         g_primary_index_id.low  = static_cast<uint32_t>(idx_id_64 & 0xffffffff);
 
@@ -610,6 +667,10 @@ void parse_records_on_page(const unsigned char* page,
 
   // 3) Check if COMPACT or REDUNDANT
   bool is_compact = page_is_comp(page);
+  if (!is_compact) {
+    // Skip old REDUNDANT format (not supported).
+    return;
+  }
 
   // 4) infimum / supremum offsets
   ulint inf_offset = (is_compact) ? PAGE_NEW_INFIMUM : PAGE_OLD_INFIMUM;
