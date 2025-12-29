@@ -29,10 +29,13 @@
 #include <errno.h>
 #include <string.h>
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <zlib.h>
 
@@ -41,6 +44,8 @@
 #include "my_dir.h"
 #include "my_getopt.h"
 #include "my_io.h"
+#include "my_sys.h"
+#include "mysql_com.h"
 //#include "mysys.h"
 #include "print_version.h"
 #include "welcome_copyright_notice.h"
@@ -58,6 +63,7 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 // InnoDB headers needed for decompress, page size, etc.
 #include "data0type.h"
 #include "dict0dict.h"
+#include "dict0dd.h"
 #include "fil0fil.h"
 #include "fsp0fsp.h"
 #include "fsp0types.h"
@@ -65,9 +71,15 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 #include "page0page.h"
 #include "page0size.h"
 #include "page0types.h"
+#include "sql/dd/types/column.h"
+#include "sql/dd/types/index.h"
+#include "sql/dd/types/table.h"
+#include "sql/my_decimal.h"
+#include "sql/sql_const.h"
 #include "univ.i"
 #include "ut0byte.h"
 #include "ut0crc32.h"
+#include "m_ctype.h"
 //#include "page/zipdecompress.h" // Has page_zip_decompress_low()
 
 /*
@@ -381,6 +393,1561 @@ static bool load_sdi_json_entries(const char* json_path,
               return a.id < b.id;
             });
 
+  return true;
+}
+
+// ----------------------------------------------------------------
+// SDI metadata parsing for .cfg generation
+// ----------------------------------------------------------------
+constexpr uint32_t kPortableSizeOfCharPtr = 8;
+
+struct SdiColumnInfo {
+  std::string name;
+  dd::enum_column_types type{dd::enum_column_types::TYPE_NULL};
+  bool is_nullable{true};
+  bool is_unsigned{false};
+  bool is_virtual{false};
+  uint32_t hidden{0};
+  uint32_t char_length{0};
+  uint32_t numeric_scale{0};
+  uint32_t collation_id{0};
+  std::string se_private_data;
+  std::vector<std::string> elements;
+};
+
+struct SdiIndexElementInfo {
+  int column_opx{-1};
+  uint32_t length{UINT32_MAX};
+  uint32_t order{0};
+  bool hidden{false};
+};
+
+struct SdiIndexInfo {
+  std::string name;
+  uint32_t type{0};
+  std::string options;
+  std::string se_private_data;
+  std::vector<SdiIndexElementInfo> elements;
+};
+
+struct SdiTableInfo {
+  std::string name;
+  std::string schema;
+  std::string options;
+  std::string se_private_data;
+  uint32_t row_format{0};
+  std::vector<SdiColumnInfo> columns;
+  std::vector<SdiIndexInfo> indexes;
+};
+
+struct SdiTablespaceInfo {
+  std::string name;
+  std::string options;
+  std::string se_private_data;
+};
+
+struct SdiMetadata {
+  bool has_table{false};
+  bool has_tablespace{false};
+  SdiTableInfo table;
+  SdiTablespaceInfo tablespace;
+};
+
+static bool sdi_read_string(const rapidjson::Value& val, std::string* out) {
+  if (val.IsString()) {
+    *out = val.GetString();
+    return true;
+  }
+  return false;
+}
+
+static bool sdi_read_bool(const rapidjson::Value& val, bool* out) {
+  if (val.IsBool()) {
+    *out = val.GetBool();
+    return true;
+  }
+  if (val.IsInt()) {
+    *out = (val.GetInt() != 0);
+    return true;
+  }
+  return false;
+}
+
+static bool sdi_read_uint32(const rapidjson::Value& val, uint32_t* out) {
+  uint64_t tmp = 0;
+  if (!sdi_read_uint64(val, &tmp)) {
+    return false;
+  }
+  if (tmp > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  *out = static_cast<uint32_t>(tmp);
+  return true;
+}
+
+static std::unordered_map<std::string, std::string> parse_kv_string(
+    const std::string& input) {
+  std::unordered_map<std::string, std::string> out;
+  size_t pos = 0;
+  while (pos < input.size()) {
+    const size_t end = input.find(';', pos);
+    const size_t len = (end == std::string::npos) ? input.size() - pos : end - pos;
+    if (len > 0) {
+      const std::string token = input.substr(pos, len);
+      const size_t eq = token.find('=');
+      if (eq != std::string::npos) {
+        const std::string key = token.substr(0, eq);
+        const std::string value = token.substr(eq + 1);
+        if (!key.empty()) {
+          out[key] = value;
+        }
+      } else if (!token.empty()) {
+        out[token] = "";
+      }
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    pos = end + 1;
+  }
+  return out;
+}
+
+static bool parse_uint64_value(const std::string& s, uint64_t* out) {
+  if (s.empty()) {
+    return false;
+  }
+  char* end = nullptr;
+  errno = 0;
+  unsigned long long v = strtoull(s.c_str(), &end, 10);
+  if (errno != 0 || end == s.c_str()) {
+    return false;
+  }
+  *out = static_cast<uint64_t>(v);
+  return true;
+}
+
+static bool parse_uint32_value(const std::string& s, uint32_t* out) {
+  uint64_t tmp = 0;
+  if (!parse_uint64_value(s, &tmp) ||
+      tmp > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  *out = static_cast<uint32_t>(tmp);
+  return true;
+}
+
+static bool load_sdi_metadata(const char* json_path, SdiMetadata* meta) {
+  if (meta == nullptr) {
+    return false;
+  }
+
+  std::ifstream ifs(json_path);
+  if (!ifs.is_open()) {
+    fprintf(stderr, "Error: cannot open SDI JSON file: %s\n", json_path);
+    return false;
+  }
+
+  rapidjson::IStreamWrapper isw(ifs);
+  rapidjson::Document doc;
+  doc.ParseStream(isw);
+  if (doc.HasParseError()) {
+    fprintf(stderr, "Error: SDI JSON parse error: %s at offset %zu\n",
+            rapidjson::GetParseError_En(doc.GetParseError()),
+            doc.GetErrorOffset());
+    return false;
+  }
+
+  if (!doc.IsArray()) {
+    fprintf(stderr, "Error: SDI JSON top-level is not an array.\n");
+    return false;
+  }
+
+  meta->has_table = false;
+  meta->has_tablespace = false;
+
+  for (const auto& elem : doc.GetArray()) {
+    if (!elem.IsObject() || !elem.HasMember("object")) {
+      continue;
+    }
+    const auto& obj = elem["object"];
+    if (!obj.HasMember("dd_object_type") || !obj["dd_object_type"].IsString()) {
+      continue;
+    }
+
+    const std::string dd_type = obj["dd_object_type"].GetString();
+    if (!obj.HasMember("dd_object") || !obj["dd_object"].IsObject()) {
+      continue;
+    }
+    const auto& dd_obj = obj["dd_object"];
+
+    if (dd_type == "Table") {
+      meta->has_table = true;
+      SdiTableInfo info;
+      if (dd_obj.HasMember("name")) {
+        sdi_read_string(dd_obj["name"], &info.name);
+      }
+      if (dd_obj.HasMember("schema_ref")) {
+        sdi_read_string(dd_obj["schema_ref"], &info.schema);
+      }
+      if (dd_obj.HasMember("options")) {
+        sdi_read_string(dd_obj["options"], &info.options);
+      }
+      if (dd_obj.HasMember("se_private_data")) {
+        sdi_read_string(dd_obj["se_private_data"], &info.se_private_data);
+      }
+      if (dd_obj.HasMember("row_format")) {
+        sdi_read_uint32(dd_obj["row_format"], &info.row_format);
+      }
+
+      if (dd_obj.HasMember("columns") && dd_obj["columns"].IsArray()) {
+        const auto& cols = dd_obj["columns"].GetArray();
+        info.columns.reserve(cols.Size());
+        for (const auto& c : cols) {
+          if (!c.IsObject()) {
+            continue;
+          }
+          SdiColumnInfo col;
+          if (c.HasMember("name")) {
+            sdi_read_string(c["name"], &col.name);
+          }
+          if (c.HasMember("type") && c["type"].IsUint()) {
+            col.type = static_cast<dd::enum_column_types>(c["type"].GetUint());
+          }
+          if (c.HasMember("is_nullable")) {
+            sdi_read_bool(c["is_nullable"], &col.is_nullable);
+          }
+          if (c.HasMember("is_unsigned")) {
+            sdi_read_bool(c["is_unsigned"], &col.is_unsigned);
+          }
+          if (c.HasMember("is_virtual")) {
+            sdi_read_bool(c["is_virtual"], &col.is_virtual);
+          }
+          if (c.HasMember("hidden")) {
+            sdi_read_uint32(c["hidden"], &col.hidden);
+          }
+          if (c.HasMember("char_length")) {
+            sdi_read_uint32(c["char_length"], &col.char_length);
+          }
+          if (c.HasMember("numeric_scale")) {
+            sdi_read_uint32(c["numeric_scale"], &col.numeric_scale);
+          }
+          if (c.HasMember("collation_id")) {
+            sdi_read_uint32(c["collation_id"], &col.collation_id);
+          }
+          if (c.HasMember("se_private_data")) {
+            sdi_read_string(c["se_private_data"], &col.se_private_data);
+          }
+          if (c.HasMember("elements") && c["elements"].IsArray()) {
+            for (const auto& el : c["elements"].GetArray()) {
+              if (el.IsString()) {
+                col.elements.emplace_back(el.GetString());
+              } else if (el.IsObject() && el.HasMember("name") &&
+                         el["name"].IsString()) {
+                col.elements.emplace_back(el["name"].GetString());
+              }
+            }
+          }
+          info.columns.push_back(std::move(col));
+        }
+      }
+
+      if (dd_obj.HasMember("indexes") && dd_obj["indexes"].IsArray()) {
+        const auto& idxs = dd_obj["indexes"].GetArray();
+        info.indexes.reserve(idxs.Size());
+        for (const auto& idx : idxs) {
+          if (!idx.IsObject()) {
+            continue;
+          }
+          SdiIndexInfo index;
+          if (idx.HasMember("name")) {
+            sdi_read_string(idx["name"], &index.name);
+          }
+          if (idx.HasMember("type")) {
+            sdi_read_uint32(idx["type"], &index.type);
+          }
+          if (idx.HasMember("options")) {
+            sdi_read_string(idx["options"], &index.options);
+          }
+          if (idx.HasMember("se_private_data")) {
+            sdi_read_string(idx["se_private_data"], &index.se_private_data);
+          }
+          if (idx.HasMember("elements") && idx["elements"].IsArray()) {
+            const auto& elements = idx["elements"].GetArray();
+            index.elements.reserve(elements.Size());
+            for (const auto& el : elements) {
+              if (!el.IsObject()) {
+                continue;
+              }
+              SdiIndexElementInfo e;
+              if (el.HasMember("column_opx") && el["column_opx"].IsInt()) {
+                e.column_opx = el["column_opx"].GetInt();
+              }
+              if (el.HasMember("length")) {
+                sdi_read_uint32(el["length"], &e.length);
+              }
+              if (el.HasMember("order")) {
+                sdi_read_uint32(el["order"], &e.order);
+              }
+              if (el.HasMember("hidden")) {
+                sdi_read_bool(el["hidden"], &e.hidden);
+              }
+              index.elements.push_back(e);
+            }
+          }
+          info.indexes.push_back(std::move(index));
+        }
+      }
+
+      meta->table = std::move(info);
+    } else if (dd_type == "Tablespace") {
+      meta->has_tablespace = true;
+      SdiTablespaceInfo space;
+      if (dd_obj.HasMember("name")) {
+        sdi_read_string(dd_obj["name"], &space.name);
+      }
+      if (dd_obj.HasMember("options")) {
+        sdi_read_string(dd_obj["options"], &space.options);
+      }
+      if (dd_obj.HasMember("se_private_data")) {
+        sdi_read_string(dd_obj["se_private_data"], &space.se_private_data);
+      }
+      meta->tablespace = std::move(space);
+    }
+  }
+
+  if (!meta->has_table) {
+    fprintf(stderr, "Error: SDI JSON missing Table object\n");
+    return false;
+  }
+  if (!meta->has_tablespace) {
+    fprintf(stderr, "Warning: SDI JSON missing Tablespace object\n");
+  }
+
+  return true;
+}
+
+// ----------------------------------------------------------------
+// Minimal type/length helpers for cfg generation (mirrors MySQL logic)
+// ----------------------------------------------------------------
+static unsigned int my_time_binary_length_local(unsigned int dec) {
+  return 3 + (dec + 1) / 2;
+}
+
+static unsigned int my_datetime_binary_length_local(unsigned int dec) {
+  return 5 + (dec + 1) / 2;
+}
+
+static unsigned int my_timestamp_binary_length_local(unsigned int dec) {
+  return 4 + (dec + 1) / 2;
+}
+
+static uint32_t get_enum_pack_length_local(uint32_t elements) {
+  return elements < 256 ? 1 : 2;
+}
+
+static uint32_t get_set_pack_length_local(uint32_t elements) {
+  uint32_t len = (elements + 7) / 8;
+  return len > 4 ? 8 : len;
+}
+
+static enum_field_types dd_get_old_field_type_local(dd::enum_column_types type) {
+  switch (type) {
+    case dd::enum_column_types::DECIMAL:
+      return MYSQL_TYPE_DECIMAL;
+    case dd::enum_column_types::TINY:
+      return MYSQL_TYPE_TINY;
+    case dd::enum_column_types::SHORT:
+      return MYSQL_TYPE_SHORT;
+    case dd::enum_column_types::LONG:
+      return MYSQL_TYPE_LONG;
+    case dd::enum_column_types::FLOAT:
+      return MYSQL_TYPE_FLOAT;
+    case dd::enum_column_types::DOUBLE:
+      return MYSQL_TYPE_DOUBLE;
+    case dd::enum_column_types::TYPE_NULL:
+      return MYSQL_TYPE_NULL;
+    case dd::enum_column_types::TIMESTAMP:
+      return MYSQL_TYPE_TIMESTAMP;
+    case dd::enum_column_types::LONGLONG:
+      return MYSQL_TYPE_LONGLONG;
+    case dd::enum_column_types::INT24:
+      return MYSQL_TYPE_INT24;
+    case dd::enum_column_types::DATE:
+      return MYSQL_TYPE_DATE;
+    case dd::enum_column_types::TIME:
+      return MYSQL_TYPE_TIME;
+    case dd::enum_column_types::DATETIME:
+      return MYSQL_TYPE_DATETIME;
+    case dd::enum_column_types::YEAR:
+      return MYSQL_TYPE_YEAR;
+    case dd::enum_column_types::NEWDATE:
+      return MYSQL_TYPE_NEWDATE;
+    case dd::enum_column_types::VARCHAR:
+      return MYSQL_TYPE_VARCHAR;
+    case dd::enum_column_types::BIT:
+      return MYSQL_TYPE_BIT;
+    case dd::enum_column_types::TIMESTAMP2:
+      return MYSQL_TYPE_TIMESTAMP2;
+    case dd::enum_column_types::DATETIME2:
+      return MYSQL_TYPE_DATETIME2;
+    case dd::enum_column_types::TIME2:
+      return MYSQL_TYPE_TIME2;
+    case dd::enum_column_types::NEWDECIMAL:
+      return MYSQL_TYPE_NEWDECIMAL;
+    case dd::enum_column_types::ENUM:
+      return MYSQL_TYPE_ENUM;
+    case dd::enum_column_types::SET:
+      return MYSQL_TYPE_SET;
+    case dd::enum_column_types::TINY_BLOB:
+      return MYSQL_TYPE_TINY_BLOB;
+    case dd::enum_column_types::MEDIUM_BLOB:
+      return MYSQL_TYPE_MEDIUM_BLOB;
+    case dd::enum_column_types::LONG_BLOB:
+      return MYSQL_TYPE_LONG_BLOB;
+    case dd::enum_column_types::BLOB:
+      return MYSQL_TYPE_BLOB;
+    case dd::enum_column_types::VAR_STRING:
+      return MYSQL_TYPE_VAR_STRING;
+    case dd::enum_column_types::STRING:
+      return MYSQL_TYPE_STRING;
+    case dd::enum_column_types::GEOMETRY:
+      return MYSQL_TYPE_GEOMETRY;
+    case dd::enum_column_types::JSON:
+      return MYSQL_TYPE_JSON;
+    default:
+      break;
+  }
+  return MYSQL_TYPE_LONG;
+}
+
+static size_t calc_pack_length_local(enum_field_types type, size_t length) {
+  switch (type) {
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_DECIMAL:
+      return length;
+    case MYSQL_TYPE_VARCHAR:
+      return length + (length < 256 ? 1 : 2);
+    case MYSQL_TYPE_BOOL:
+    case MYSQL_TYPE_YEAR:
+    case MYSQL_TYPE_TINY:
+      return 1;
+    case MYSQL_TYPE_SHORT:
+      return 2;
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_NEWDATE:
+      return 3;
+    case MYSQL_TYPE_TIME:
+      return 3;
+    case MYSQL_TYPE_TIME2:
+      return length > MAX_TIME_WIDTH
+                 ? my_time_binary_length_local(
+                       length - MAX_TIME_WIDTH - 1)
+                 : 3;
+    case MYSQL_TYPE_TIMESTAMP:
+      return 4;
+    case MYSQL_TYPE_TIMESTAMP2:
+      return length > MAX_DATETIME_WIDTH
+                 ? my_timestamp_binary_length_local(
+                       length - MAX_DATETIME_WIDTH - 1)
+                 : 4;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_LONG:
+      return 4;
+    case MYSQL_TYPE_FLOAT:
+      return sizeof(float);
+    case MYSQL_TYPE_DOUBLE:
+      return sizeof(double);
+    case MYSQL_TYPE_DATETIME:
+      return 8;
+    case MYSQL_TYPE_DATETIME2:
+      return length > MAX_DATETIME_WIDTH
+                 ? my_datetime_binary_length_local(
+                       length - MAX_DATETIME_WIDTH - 1)
+                 : 5;
+    case MYSQL_TYPE_LONGLONG:
+      return 8;
+    case MYSQL_TYPE_NULL:
+      return 0;
+    case MYSQL_TYPE_TINY_BLOB:
+      return 1 + kPortableSizeOfCharPtr;
+    case MYSQL_TYPE_BLOB:
+      return 2 + kPortableSizeOfCharPtr;
+    case MYSQL_TYPE_MEDIUM_BLOB:
+      return 3 + kPortableSizeOfCharPtr;
+    case MYSQL_TYPE_LONG_BLOB:
+      return 4 + kPortableSizeOfCharPtr;
+    case MYSQL_TYPE_GEOMETRY:
+      return 4 + kPortableSizeOfCharPtr;
+    case MYSQL_TYPE_JSON:
+      return 4 + kPortableSizeOfCharPtr;
+    case MYSQL_TYPE_BIT:
+      return length / 8;
+    default:
+      break;
+  }
+  return 0;
+}
+
+static uint32_t calc_key_length_local(enum_field_types sql_type, uint32_t length,
+                                      uint32_t decimals, bool is_unsigned,
+                                      uint32_t elements) {
+  uint precision;
+  switch (sql_type) {
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_GEOMETRY:
+    case MYSQL_TYPE_JSON:
+      return 0;
+    case MYSQL_TYPE_VARCHAR:
+      return length;
+    case MYSQL_TYPE_ENUM:
+      return get_enum_pack_length_local(elements);
+    case MYSQL_TYPE_SET:
+      return get_set_pack_length_local(elements);
+    case MYSQL_TYPE_BIT:
+      return length / 8 + (length & 7 ? 1 : 0);
+    case MYSQL_TYPE_NEWDECIMAL:
+      precision = std::min<uint>(
+          my_decimal_length_to_precision(length, decimals, is_unsigned),
+          DECIMAL_MAX_PRECISION);
+      return my_decimal_get_binary_size(precision, decimals);
+    default:
+      return static_cast<uint32_t>(calc_pack_length_local(sql_type, length));
+  }
+}
+
+static size_t calc_pack_length_dd_local(dd::enum_column_types type,
+                                        size_t char_length,
+                                        size_t elements_count,
+                                        bool treat_bit_as_char,
+                                        uint numeric_scale,
+                                        bool is_unsigned) {
+  size_t pack_length = 0;
+  switch (type) {
+    case dd::enum_column_types::TINY_BLOB:
+    case dd::enum_column_types::MEDIUM_BLOB:
+    case dd::enum_column_types::LONG_BLOB:
+    case dd::enum_column_types::BLOB:
+    case dd::enum_column_types::GEOMETRY:
+    case dd::enum_column_types::VAR_STRING:
+    case dd::enum_column_types::STRING:
+    case dd::enum_column_types::VARCHAR:
+      pack_length =
+          calc_pack_length_local(dd_get_old_field_type_local(type), char_length);
+      break;
+    case dd::enum_column_types::ENUM:
+      pack_length = get_enum_pack_length_local(
+          static_cast<uint32_t>(elements_count));
+      break;
+    case dd::enum_column_types::SET:
+      pack_length =
+          get_set_pack_length_local(static_cast<uint32_t>(elements_count));
+      break;
+    case dd::enum_column_types::BIT:
+      pack_length =
+          treat_bit_as_char ? ((char_length + 7) & ~7) / 8 : char_length / 8;
+      break;
+    case dd::enum_column_types::NEWDECIMAL: {
+      uint decimals = numeric_scale;
+      uint precision = std::min<uint>(
+          my_decimal_length_to_precision(char_length, decimals, is_unsigned),
+          DECIMAL_MAX_PRECISION);
+      pack_length = my_decimal_get_binary_size(precision, decimals);
+      break;
+    }
+    default:
+      pack_length =
+          calc_pack_length_local(dd_get_old_field_type_local(type), char_length);
+      break;
+  }
+  return pack_length;
+}
+
+static ulint get_innobase_type_from_mysql_dd_type_local(
+    ulint* unsigned_flag, ulint* binary_type, ulint* charset_no,
+    dd::enum_column_types dd_type, const CHARSET_INFO* field_charset,
+    bool is_unsigned) {
+  *unsigned_flag = 0;
+  *binary_type = DATA_BINARY_TYPE;
+  *charset_no = 0;
+
+  switch (dd_type) {
+    case dd::enum_column_types::ENUM:
+    case dd::enum_column_types::SET:
+      *unsigned_flag = DATA_UNSIGNED;
+      if (field_charset != &my_charset_bin) {
+        *binary_type = 0;
+      }
+      return DATA_INT;
+    case dd::enum_column_types::VAR_STRING:
+    case dd::enum_column_types::VARCHAR:
+      *charset_no = field_charset->number;
+      if (field_charset == &my_charset_bin) {
+        return DATA_BINARY;
+      }
+      *binary_type = 0;
+      return (field_charset == &my_charset_latin1) ? DATA_VARCHAR
+                                                   : DATA_VARMYSQL;
+    case dd::enum_column_types::BIT:
+      *unsigned_flag = DATA_UNSIGNED;
+      *charset_no = my_charset_bin.number;
+      return DATA_FIXBINARY;
+    case dd::enum_column_types::STRING:
+      *charset_no = field_charset->number;
+      if (field_charset == &my_charset_bin) {
+        return DATA_FIXBINARY;
+      }
+      *binary_type = 0;
+      return (field_charset == &my_charset_latin1) ? DATA_CHAR : DATA_MYSQL;
+    case dd::enum_column_types::DECIMAL:
+    case dd::enum_column_types::FLOAT:
+    case dd::enum_column_types::DOUBLE:
+    case dd::enum_column_types::NEWDECIMAL:
+    case dd::enum_column_types::LONG:
+    case dd::enum_column_types::LONGLONG:
+    case dd::enum_column_types::TINY:
+    case dd::enum_column_types::SHORT:
+    case dd::enum_column_types::INT24:
+      if (is_unsigned) {
+        *unsigned_flag = DATA_UNSIGNED;
+      }
+      if (dd_type == dd::enum_column_types::NEWDECIMAL) {
+        *charset_no = my_charset_bin.number;
+        return DATA_FIXBINARY;
+      }
+      return DATA_INT;
+    case dd::enum_column_types::DATE:
+    case dd::enum_column_types::NEWDATE:
+    case dd::enum_column_types::TIME:
+    case dd::enum_column_types::DATETIME:
+      return DATA_INT;
+    case dd::enum_column_types::YEAR:
+    case dd::enum_column_types::TIMESTAMP:
+      *unsigned_flag = DATA_UNSIGNED;
+      return DATA_INT;
+    case dd::enum_column_types::TIME2:
+    case dd::enum_column_types::DATETIME2:
+    case dd::enum_column_types::TIMESTAMP2:
+      *charset_no = my_charset_bin.number;
+      return DATA_FIXBINARY;
+    case dd::enum_column_types::GEOMETRY:
+      return DATA_GEOMETRY;
+    case dd::enum_column_types::TINY_BLOB:
+    case dd::enum_column_types::MEDIUM_BLOB:
+    case dd::enum_column_types::BLOB:
+    case dd::enum_column_types::LONG_BLOB:
+      *charset_no = field_charset->number;
+      if (field_charset != &my_charset_bin) {
+        *binary_type = 0;
+      }
+      return DATA_BLOB;
+    case dd::enum_column_types::JSON:
+      *charset_no = my_charset_utf8mb4_bin.number;
+      return DATA_BLOB;
+    case dd::enum_column_types::TYPE_NULL:
+      *charset_no = field_charset->number;
+      if (field_charset != &my_charset_bin) {
+        *binary_type = 0;
+      }
+      break;
+    default:
+      break;
+  }
+
+  return 0;
+}
+
+struct ColumnTypeInfo {
+  ulint mtype{0};
+  ulint prtype{0};
+  ulint len{0};
+  ulint mbminmaxlen{0};
+  bool is_nullable{true};
+  bool is_unsigned{false};
+};
+
+struct CfgColumn {
+  std::string name;
+  dd::enum_column_types dd_type{dd::enum_column_types::TYPE_NULL};
+  uint32_t prtype{0};
+  uint32_t mtype{0};
+  uint32_t len{0};
+  uint32_t mbminmaxlen{0};
+  uint32_t ind{0};
+  uint32_t ord_part{0};
+  uint32_t max_prefix{0};
+  uint32_t char_length{0};
+  uint32_t numeric_scale{0};
+  uint64_t collation_id{0};
+  bool is_nullable{true};
+  bool is_unsigned{false};
+  bool is_instant_dropped{false};
+  uint8_t version_added{UINT8_UNDEFINED};
+  uint8_t version_dropped{UINT8_UNDEFINED};
+  uint32_t phy_pos{UINT32_UNDEFINED};
+  bool has_instant_default{false};
+  bool instant_default_null{false};
+  std::vector<byte> instant_default_value;
+  std::vector<std::string> elements;
+};
+
+struct CfgIndexField {
+  std::string name;
+  uint32_t prefix_len{0};
+  uint32_t fixed_len{0};
+  uint32_t is_ascending{1};
+};
+
+struct CfgIndex {
+  std::string name;
+  uint64_t id{0};
+  uint32_t space{0};
+  uint32_t page{0};
+  uint32_t type{0};
+  uint32_t trx_id_offset{0};
+  uint32_t n_user_defined_cols{0};
+  uint32_t n_uniq{0};
+  uint32_t n_nullable{0};
+  uint32_t n_fields{0};
+  std::vector<CfgIndexField> fields;
+};
+
+struct CfgTable {
+  std::string name;
+  uint64_t autoinc{0};
+  uint32_t table_flags{0};
+  uint32_t space_flags{0};
+  uint32_t n_instant_nullable{0};
+  uint32_t initial_col_count{0};
+  uint32_t current_col_count{0};
+  uint32_t total_col_count{0};
+  uint32_t n_instant_drop_cols{0};
+  uint32_t current_row_version{0};
+  uint8_t compression_type{0};
+  bool has_row_versions{false};
+  bool is_comp{true};
+  std::vector<CfgColumn> columns;
+  std::vector<CfgIndex> indexes;
+};
+
+static bool is_system_column_name(const std::string& name) {
+  return name.rfind("DB_ROW_ID", 0) == 0 ||
+         name.rfind("DB_TRX_ID", 0) == 0 ||
+         name.rfind("DB_ROLL_PTR", 0) == 0;
+}
+
+static const CHARSET_INFO* resolve_charset(uint32_t collation_id) {
+  if (collation_id == 0) {
+    return &my_charset_bin;
+  }
+  CHARSET_INFO* cs = get_charset(collation_id, MYF(0));
+  return cs != nullptr ? cs : &my_charset_bin;
+}
+
+static bool build_column_type_info(const SdiColumnInfo& col,
+                                   ColumnTypeInfo* out) {
+  if (out == nullptr) {
+    return false;
+  }
+
+  const CHARSET_INFO* charset = resolve_charset(col.collation_id);
+
+  ulint unsigned_flag = 0;
+  ulint binary_type = 0;
+  ulint charset_no = 0;
+  ulint mtype = get_innobase_type_from_mysql_dd_type_local(
+      &unsigned_flag, &binary_type, &charset_no, col.type, charset,
+      col.is_unsigned);
+
+  size_t col_len = calc_pack_length_dd_local(
+      col.type, col.char_length, col.elements.size(), true, col.numeric_scale,
+      col.is_unsigned);
+
+  ulint long_true_varchar = 0;
+  if (col.type == dd::enum_column_types::VARCHAR) {
+    size_t length_bytes = col.char_length > 255 ? 2 : 1;
+    if (col_len >= length_bytes) {
+      col_len -= length_bytes;
+    }
+    if (length_bytes == 2) {
+      long_true_varchar = DATA_LONG_TRUE_VARCHAR;
+    }
+  }
+
+  ulint nulls_allowed = col.is_nullable ? 0 : DATA_NOT_NULL;
+  ulint prtype = dtype_form_prtype(
+      static_cast<ulint>(dd_get_old_field_type_local(col.type)) |
+          unsigned_flag | binary_type | nulls_allowed | long_true_varchar,
+      charset_no);
+
+  ulint mbminmaxlen = 0;
+  if (dtype_is_string_type(mtype)) {
+    mbminmaxlen = DATA_MBMINMAXLEN(charset->mbminlen, charset->mbmaxlen);
+  }
+
+  out->mtype = mtype;
+  out->prtype = prtype;
+  out->len = col_len;
+  out->mbminmaxlen = mbminmaxlen;
+  out->is_nullable = col.is_nullable;
+  out->is_unsigned = col.is_unsigned;
+  return true;
+}
+
+static uint32_t calc_prefix_len(const SdiColumnInfo& col,
+                                const SdiIndexElementInfo& elem) {
+  if (elem.length == UINT32_MAX) {
+    return 0;
+  }
+  const enum_field_types sql_type = dd_get_old_field_type_local(col.type);
+  const uint32_t full_len = calc_key_length_local(
+      sql_type, col.char_length, col.numeric_scale, col.is_unsigned,
+      static_cast<uint32_t>(col.elements.size()));
+  if (full_len != 0 && elem.length >= full_len) {
+    return 0;
+  }
+  return elem.length;
+}
+
+static uint32_t calc_fixed_len(const ColumnTypeInfo& type_info, bool comp,
+                               uint32_t prefix_len, bool is_spatial,
+                               bool is_first_field) {
+  ulint fixed_len =
+      dtype_get_fixed_size_low(type_info.mtype, type_info.prtype,
+                               type_info.len, type_info.mbminmaxlen, comp);
+
+  if (is_spatial && is_first_field && DATA_POINT_MTYPE(type_info.mtype)) {
+    fixed_len = DATA_MBR_LEN;
+  }
+
+  if (prefix_len && fixed_len > prefix_len) {
+    fixed_len = prefix_len;
+  }
+
+  if (fixed_len > DICT_MAX_FIXED_COL_LEN) {
+    fixed_len = 0;
+  }
+
+  return static_cast<uint32_t>(fixed_len);
+}
+
+static std::string table_full_name(const SdiTableInfo& table) {
+  if (!table.schema.empty()) {
+    return table.schema + "/" + table.name;
+  }
+  return table.name;
+}
+
+static bool decode_instant_default(
+    const std::unordered_map<std::string, std::string>& kv,
+    std::vector<byte>* out_value, bool* out_null, bool* out_has_default) {
+  if (out_value == nullptr || out_null == nullptr || out_has_default == nullptr) {
+    return false;
+  }
+
+  const auto def_it = kv.find(dd_column_key_strings[DD_INSTANT_COLUMN_DEFAULT]);
+  const auto def_null_it =
+      kv.find(dd_column_key_strings[DD_INSTANT_COLUMN_DEFAULT_NULL]);
+
+  if (def_null_it != kv.end()) {
+    *out_has_default = true;
+    *out_null = true;
+    return true;
+  }
+
+  if (def_it == kv.end()) {
+    *out_has_default = false;
+    *out_null = false;
+    return true;
+  }
+
+  DD_instant_col_val_coder coder;
+  size_t out_len = 0;
+  const byte* decoded = coder.decode(def_it->second.c_str(),
+                                     def_it->second.size(), &out_len);
+  if (decoded == nullptr) {
+    return false;
+  }
+
+  out_value->assign(decoded, decoded + out_len);
+  *out_has_default = true;
+  *out_null = false;
+  return true;
+}
+
+static uint8_t parse_row_version(const std::unordered_map<std::string, std::string>& kv,
+                                 size_t key_index) {
+  uint32_t version = UINT32_UNDEFINED;
+  const auto it = kv.find(dd_column_key_strings[key_index]);
+  if (it != kv.end() && parse_uint32_value(it->second, &version)) {
+    if (version <= std::numeric_limits<uint8_t>::max()) {
+      return static_cast<uint8_t>(version);
+    }
+  }
+  return UINT8_UNDEFINED;
+}
+
+static bool build_cfg_table_from_sdi(const SdiMetadata& meta,
+                                     uint32_t space_flags,
+                                     page_no_t sdi_root_page,
+                                     space_id_t space_id,
+                                     CfgTable* out) {
+  if (out == nullptr) {
+    return false;
+  }
+
+  CfgTable cfg;
+  cfg.name = table_full_name(meta.table);
+  cfg.space_flags = space_flags;
+
+  const auto table_kv = parse_kv_string(meta.table.se_private_data);
+  const auto space_kv = parse_kv_string(meta.tablespace.se_private_data);
+  const auto options_kv = parse_kv_string(meta.table.options);
+
+  uint64_t autoinc = 0;
+  auto autoinc_it = table_kv.find(dd_table_key_strings[DD_TABLE_AUTOINC]);
+  if (autoinc_it != table_kv.end()) {
+    parse_uint64_value(autoinc_it->second, &autoinc);
+  }
+  cfg.autoinc = autoinc;
+
+  bool data_dir = false;
+  if (table_kv.find(dd_table_key_strings[DD_TABLE_DATA_DIRECTORY]) !=
+      table_kv.end()) {
+    data_dir = true;
+  }
+
+  bool shared_space = true;
+  if (!meta.tablespace.name.empty()) {
+    if (meta.tablespace.name.find('/') != std::string::npos) {
+      shared_space = false;
+    }
+  } else {
+    shared_space = false;
+  }
+
+  uint32_t zip_ssize = FSP_FLAGS_GET_ZIP_SSIZE(space_flags);
+  if (zip_ssize != 0) {
+    auto kb_it = options_kv.find("key_block_size");
+    if (kb_it != options_kv.end()) {
+      uint32_t kb = 0;
+      if (parse_uint32_value(kb_it->second, &kb) && kb > 0) {
+        uint32_t zip_size = kb * 1024;
+        uint32_t shift = 0;
+        while (zip_size > 512) {
+          zip_size >>= 1;
+          shift++;
+        }
+        if (shift > 0) {
+          zip_ssize = shift - 1;
+        }
+      }
+    }
+  }
+
+  bool compact = true;
+  bool atomic_blobs = true;
+  switch (static_cast<dd::Table::enum_row_format>(meta.table.row_format)) {
+    case dd::Table::RF_REDUNDANT:
+      compact = false;
+      atomic_blobs = false;
+      zip_ssize = 0;
+      break;
+    case dd::Table::RF_COMPACT:
+      compact = true;
+      atomic_blobs = false;
+      zip_ssize = 0;
+      break;
+    case dd::Table::RF_COMPRESSED:
+      compact = true;
+      atomic_blobs = true;
+      break;
+    case dd::Table::RF_DYNAMIC:
+    default:
+      compact = true;
+      atomic_blobs = true;
+      zip_ssize = 0;
+      break;
+  }
+
+  cfg.table_flags = dict_tf_init(compact, zip_ssize, atomic_blobs, data_dir,
+                                 shared_space);
+  cfg.is_comp = compact;
+
+  auto compress_it = options_kv.find("compress");
+  if (compress_it != options_kv.end()) {
+    std::string c = compress_it->second;
+    std::transform(c.begin(), c.end(), c.begin(), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
+    });
+    if (c == "zlib") {
+      cfg.compression_type = 1;
+    } else if (c == "lz4") {
+      cfg.compression_type = 2;
+    }
+  }
+
+  const size_t total_cols = meta.table.columns.size();
+  std::vector<ColumnTypeInfo> col_types(total_cols);
+  std::vector<bool> col_dropped(total_cols, false);
+  std::vector<bool> col_has_phy(total_cols, false);
+
+  cfg.columns.clear();
+  cfg.columns.reserve(total_cols);
+  std::vector<int> opx_to_col_index(total_cols, -1);
+
+  for (size_t i = 0; i < total_cols; ++i) {
+    const auto& col = meta.table.columns[i];
+
+    ColumnTypeInfo type_info;
+    if (!build_column_type_info(col, &type_info)) {
+      fprintf(stderr, "Error: failed to build column type for %s\n",
+              col.name.c_str());
+      return false;
+    }
+    col_types[i] = type_info;
+
+    const auto kv = parse_kv_string(col.se_private_data);
+    const uint8_t v_added =
+        parse_row_version(kv, DD_INSTANT_VERSION_ADDED);
+    const uint8_t v_dropped =
+        parse_row_version(kv, DD_INSTANT_VERSION_DROPPED);
+    if (v_dropped != UINT8_UNDEFINED && v_dropped > 0) {
+      col_dropped[i] = true;
+    }
+
+    const auto phy_it = kv.find(dd_column_key_strings[DD_INSTANT_PHYSICAL_POS]);
+    uint32_t phy_pos = UINT32_UNDEFINED;
+    if (phy_it != kv.end() && parse_uint32_value(phy_it->second, &phy_pos)) {
+      col_has_phy[i] = true;
+    }
+
+    if (col.is_virtual) {
+      continue;
+    }
+
+    CfgColumn cfg_col;
+    cfg_col.name = col.name;
+    cfg_col.dd_type = col.type;
+    cfg_col.prtype = static_cast<uint32_t>(type_info.prtype);
+    cfg_col.mtype = static_cast<uint32_t>(type_info.mtype);
+    cfg_col.len = static_cast<uint32_t>(type_info.len);
+    cfg_col.mbminmaxlen = static_cast<uint32_t>(type_info.mbminmaxlen);
+    cfg_col.char_length = col.char_length;
+    cfg_col.numeric_scale = col.numeric_scale;
+    cfg_col.collation_id = col.collation_id;
+    cfg_col.is_nullable = col.is_nullable;
+    cfg_col.is_unsigned = col.is_unsigned;
+    cfg_col.elements = col.elements;
+    cfg_col.ind = static_cast<uint32_t>(cfg.columns.size());
+
+    cfg_col.version_added = v_added;
+    cfg_col.version_dropped = v_dropped;
+    cfg_col.is_instant_dropped = col_dropped[i];
+    cfg_col.phy_pos = phy_pos;
+    if (col_has_phy[i]) {
+      cfg.has_row_versions = true;
+    }
+
+    bool default_null = false;
+    bool has_default = false;
+    if (!decode_instant_default(kv, &cfg_col.instant_default_value,
+                                &default_null, &has_default)) {
+      fprintf(stderr, "Warning: failed to decode instant default for %s\n",
+              col.name.c_str());
+    }
+    cfg_col.has_instant_default = has_default;
+    cfg_col.instant_default_null = default_null;
+
+    cfg.columns.push_back(std::move(cfg_col));
+    opx_to_col_index[i] = static_cast<int>(cfg.columns.size()) - 1;
+  }
+
+  uint32_t space_id_val = static_cast<uint32_t>(space_id);
+  auto space_id_it = space_kv.find(dd_space_key_strings[DD_SPACE_ID]);
+  if (space_id_it != space_kv.end()) {
+    parse_uint32_value(space_id_it->second, &space_id_val);
+  }
+
+  // Compute column counters for instant metadata
+  size_t n_dropped_cols = 0;
+  size_t n_added_cols = 0;
+  size_t n_added_and_dropped_cols = 0;
+  size_t n_current_cols = 0;
+  uint32_t current_row_version = 0;
+
+  for (const auto& col : meta.table.columns) {
+    if (col.is_virtual || is_system_column_name(col.name)) {
+      continue;
+    }
+
+    const auto kv = parse_kv_string(col.se_private_data);
+    const uint8_t v_added =
+        parse_row_version(kv, DD_INSTANT_VERSION_ADDED);
+    const uint8_t v_dropped =
+        parse_row_version(kv, DD_INSTANT_VERSION_DROPPED);
+
+    if (v_dropped != UINT8_UNDEFINED && v_dropped > 0) {
+      n_dropped_cols++;
+      if (v_added != UINT8_UNDEFINED && v_added > 0) {
+        n_added_and_dropped_cols++;
+      }
+      current_row_version = std::max<uint32_t>(current_row_version, v_dropped);
+      continue;
+    }
+
+    if (v_added != UINT8_UNDEFINED && v_added > 0) {
+      n_added_cols++;
+      current_row_version = std::max<uint32_t>(current_row_version, v_added);
+    }
+
+    n_current_cols++;
+  }
+
+  const size_t n_orig_dropped_cols = n_dropped_cols - n_added_and_dropped_cols;
+  cfg.current_col_count = static_cast<uint32_t>(n_current_cols);
+  cfg.initial_col_count =
+      static_cast<uint32_t>((n_current_cols - n_added_cols) + n_orig_dropped_cols);
+  cfg.total_col_count = static_cast<uint32_t>(n_current_cols + n_dropped_cols);
+  cfg.n_instant_drop_cols = static_cast<uint32_t>(n_dropped_cols);
+  cfg.current_row_version = current_row_version;
+
+  if (cfg.current_row_version > 0) {
+    uint32_t nullable_before_instant = 0;
+    for (const auto& col : meta.table.columns) {
+      if (col.is_virtual || is_system_column_name(col.name)) {
+        continue;
+      }
+      const auto kv = parse_kv_string(col.se_private_data);
+      const uint8_t v_added =
+          parse_row_version(kv, DD_INSTANT_VERSION_ADDED);
+      if (v_added == UINT8_UNDEFINED || v_added == 0) {
+        if (col.is_nullable) {
+          nullable_before_instant++;
+        }
+      }
+    }
+    cfg.n_instant_nullable = nullable_before_instant;
+  }
+
+  // Build indexes from SDI
+  cfg.indexes.clear();
+
+  // Optional SDI index first
+  if (FSP_FLAGS_HAS_SDI(space_flags)) {
+    CfgIndex sdi_index;
+    sdi_index.name = "CLUST_IND_SDI";
+    sdi_index.id = dict_sdi_get_index_id();
+    sdi_index.space = space_id_val;
+    sdi_index.page = static_cast<uint32_t>(sdi_root_page);
+    sdi_index.type = DICT_CLUSTERED | DICT_UNIQUE | DICT_SDI;
+    sdi_index.n_user_defined_cols = 2;
+    sdi_index.n_uniq = 2;
+    sdi_index.n_nullable = 0;
+    sdi_index.trx_id_offset = 0;
+
+    auto add_sdi_field = [&](const char* name, uint32_t fixed_len) {
+      CfgIndexField field;
+      field.name = name;
+      field.prefix_len = 0;
+      field.fixed_len = fixed_len;
+      field.is_ascending = 1;
+      sdi_index.fields.push_back(field);
+    };
+
+    add_sdi_field("type", 4);
+    add_sdi_field("id", 8);
+    add_sdi_field("DB_TRX_ID", DATA_TRX_ID_LEN);
+    add_sdi_field("DB_ROLL_PTR", DATA_ROLL_PTR_LEN);
+    add_sdi_field("compressed_len", 4);
+    add_sdi_field("uncompressed_len", 4);
+    add_sdi_field("data", 0);
+
+    sdi_index.n_fields = static_cast<uint32_t>(sdi_index.fields.size());
+    cfg.indexes.push_back(std::move(sdi_index));
+  }
+
+  for (const auto& idx : meta.table.indexes) {
+    CfgIndex cfg_index;
+    cfg_index.name = idx.name;
+
+    bool is_unique = false;
+    bool is_spatial = false;
+    bool is_fulltext = false;
+    switch (static_cast<dd::Index::enum_index_type>(idx.type)) {
+      case dd::Index::IT_PRIMARY:
+        cfg_index.type = DICT_CLUSTERED | DICT_UNIQUE;
+        is_unique = true;
+        break;
+      case dd::Index::IT_UNIQUE:
+        cfg_index.type = DICT_UNIQUE;
+        is_unique = true;
+        break;
+      case dd::Index::IT_FULLTEXT:
+        cfg_index.type = DICT_FTS;
+        is_fulltext = true;
+        break;
+      case dd::Index::IT_SPATIAL:
+        cfg_index.type = DICT_SPATIAL;
+        is_spatial = true;
+        break;
+      case dd::Index::IT_MULTIPLE:
+      default:
+        cfg_index.type = 0;
+        break;
+    }
+
+    const auto idx_kv = parse_kv_string(idx.se_private_data);
+    auto id_it = idx_kv.find(dd_index_key_strings[DD_INDEX_ID]);
+    auto space_it = idx_kv.find(dd_index_key_strings[DD_INDEX_SPACE_ID]);
+    auto root_it = idx_kv.find(dd_index_key_strings[DD_INDEX_ROOT]);
+    if (id_it != idx_kv.end()) {
+      parse_uint64_value(id_it->second, &cfg_index.id);
+    }
+    if (space_it != idx_kv.end()) {
+      parse_uint32_value(space_it->second, &cfg_index.space);
+    } else {
+      cfg_index.space = space_id_val;
+    }
+    if (root_it != idx_kv.end()) {
+      parse_uint32_value(root_it->second, &cfg_index.page);
+    }
+
+    cfg_index.n_user_defined_cols = 0;
+    cfg_index.n_nullable = 0;
+
+    for (size_t i = 0; i < idx.elements.size(); ++i) {
+      const auto& elem = idx.elements[i];
+      if (elem.column_opx < 0 ||
+          static_cast<size_t>(elem.column_opx) >= meta.table.columns.size()) {
+        continue;
+      }
+      const auto& col = meta.table.columns[elem.column_opx];
+      const ColumnTypeInfo& type_info = col_types[elem.column_opx];
+
+      CfgIndexField field;
+      field.name = col.name;
+      field.prefix_len = calc_prefix_len(col, elem);
+      field.is_ascending = (elem.order != dd::Index_element::ORDER_DESC);
+      field.fixed_len =
+          calc_fixed_len(type_info, cfg.is_comp, field.prefix_len, is_spatial,
+                         i == 0);
+      cfg_index.fields.push_back(field);
+
+      if (!elem.hidden) {
+        cfg_index.n_user_defined_cols++;
+      }
+
+      if (col.is_nullable && !col_dropped[elem.column_opx]) {
+        cfg_index.n_nullable++;
+      }
+    }
+
+    cfg_index.n_fields = static_cast<uint32_t>(cfg_index.fields.size());
+
+    if (is_fulltext) {
+      cfg_index.n_uniq = 0;
+    } else if (is_unique) {
+      cfg_index.n_uniq = cfg_index.n_user_defined_cols;
+    } else {
+      cfg_index.n_uniq = cfg_index.n_fields;
+    }
+
+    cfg.indexes.push_back(std::move(cfg_index));
+  }
+
+  // Set ord_part and max_prefix based on ordering columns
+  std::unordered_map<std::string, size_t> name_to_col;
+  for (size_t i = 0; i < cfg.columns.size(); ++i) {
+    name_to_col[cfg.columns[i].name] = i;
+  }
+
+  for (const auto& index : cfg.indexes) {
+    if (index.name == "CLUST_IND_SDI") {
+      continue;
+    }
+    const uint32_t n_ord =
+        std::min<uint32_t>(index.n_uniq, static_cast<uint32_t>(index.fields.size()));
+    for (uint32_t i = 0; i < n_ord; ++i) {
+      const auto& field = index.fields[i];
+      const auto it = name_to_col.find(field.name);
+      if (it == name_to_col.end()) {
+        continue;
+      }
+      CfgColumn& col = cfg.columns[it->second];
+      if (col.ord_part == 0) {
+        col.max_prefix = field.prefix_len;
+        col.ord_part = 1;
+      } else if (field.prefix_len == 0) {
+        col.max_prefix = 0;
+      } else if (col.max_prefix != 0 && field.prefix_len > col.max_prefix) {
+        col.max_prefix = field.prefix_len;
+      }
+    }
+  }
+
+  if (!cfg.has_row_versions) {
+    const SdiIndexInfo* primary = nullptr;
+    for (const auto& idx : meta.table.indexes) {
+      if (idx.type == dd::Index::IT_PRIMARY || idx.name == "PRIMARY") {
+        primary = &idx;
+        break;
+      }
+    }
+
+    std::vector<bool> assigned(cfg.columns.size(), false);
+    uint32_t pos = 0;
+    if (primary != nullptr) {
+      for (const auto& elem : primary->elements) {
+        if (elem.column_opx < 0 ||
+            static_cast<size_t>(elem.column_opx) >= opx_to_col_index.size()) {
+          continue;
+        }
+        int idx = opx_to_col_index[elem.column_opx];
+        if (idx < 0 || static_cast<size_t>(idx) >= cfg.columns.size()) {
+          continue;
+        }
+        if (!assigned[idx]) {
+          cfg.columns[idx].phy_pos = pos++;
+          assigned[idx] = true;
+        }
+      }
+    }
+
+    for (size_t i = 0; i < cfg.columns.size(); ++i) {
+      if (!assigned[i]) {
+        cfg.columns[i].phy_pos = pos++;
+      }
+    }
+  }
+
+  *out = std::move(cfg);
+  return true;
+}
+
+static bool write_cfg_file(const char* path, const CfgTable& cfg) {
+  FILE* file = fopen(path, "w+b");
+  if (file == nullptr) {
+    fprintf(stderr, "Error: cannot open cfg output: %s\n", path);
+    return false;
+  }
+
+  auto write_bytes = [&](const void* buf, size_t len) -> bool {
+    return fwrite(buf, 1, len, file) == len;
+  };
+  auto write_u32 = [&](uint32_t val) -> bool {
+    byte buf[4];
+    mach_write_to_4(buf, val);
+    return write_bytes(buf, sizeof(buf));
+  };
+  auto write_u64 = [&](uint64_t val) -> bool {
+    byte buf[8];
+    mach_write_to_8(buf, val);
+    return write_bytes(buf, sizeof(buf));
+  };
+
+  if (!write_u32(IB_EXPORT_CFG_VERSION_V7)) {
+    fclose(file);
+    return false;
+  }
+
+  char hostbuf[256];
+  std::string hostname = "percona-parser";
+  if (gethostname(hostbuf, sizeof(hostbuf)) == 0) {
+    hostbuf[sizeof(hostbuf) - 1] = '\0';
+    if (hostbuf[0] != '\0') {
+      hostname = hostbuf;
+    }
+  }
+  const uint32_t host_len = static_cast<uint32_t>(hostname.size() + 1);
+  if (!write_u32(host_len) || !write_bytes(hostname.c_str(), host_len)) {
+    fclose(file);
+    return false;
+  }
+
+  const uint32_t table_len = static_cast<uint32_t>(cfg.name.size() + 1);
+  if (!write_u32(table_len) || !write_bytes(cfg.name.c_str(), table_len)) {
+    fclose(file);
+    return false;
+  }
+
+  if (!write_u64(cfg.autoinc)) {
+    fclose(file);
+    return false;
+  }
+
+  if (!write_u32(univ_page_size.logical()) ||
+      !write_u32(cfg.table_flags) ||
+      !write_u32(static_cast<uint32_t>(cfg.columns.size()))) {
+    fclose(file);
+    return false;
+  }
+
+  if (!write_u32(cfg.n_instant_nullable)) {
+    fclose(file);
+    return false;
+  }
+
+  if (!write_u32(cfg.initial_col_count) || !write_u32(cfg.current_col_count) ||
+      !write_u32(cfg.total_col_count) ||
+      !write_u32(cfg.n_instant_drop_cols) ||
+      !write_u32(cfg.current_row_version)) {
+    fclose(file);
+    return false;
+  }
+
+  if (!write_u32(cfg.space_flags)) {
+    fclose(file);
+    return false;
+  }
+
+  if (!write_bytes(&cfg.compression_type, sizeof(cfg.compression_type))) {
+    fclose(file);
+    return false;
+  }
+
+  for (const auto& col : cfg.columns) {
+    if (!write_u32(col.prtype) || !write_u32(col.mtype) ||
+        !write_u32(col.len) || !write_u32(col.mbminmaxlen) ||
+        !write_u32(col.ind) || !write_u32(col.ord_part) ||
+        !write_u32(col.max_prefix)) {
+      fclose(file);
+      return false;
+    }
+
+    const uint32_t name_len = static_cast<uint32_t>(col.name.size() + 1);
+    if (!write_u32(name_len) || !write_bytes(col.name.c_str(), name_len)) {
+      fclose(file);
+      return false;
+    }
+
+    byte meta_buf[2 + sizeof(uint32_t)];
+    meta_buf[0] = col.version_added;
+    meta_buf[1] = col.version_dropped;
+    mach_write_to_4(meta_buf + 2, col.phy_pos);
+    if (!write_bytes(meta_buf, sizeof(meta_buf))) {
+      fclose(file);
+      return false;
+    }
+
+    if (col.is_instant_dropped) {
+      byte dropped_buf[22];
+      byte* ptr = dropped_buf;
+      mach_write_to_1(ptr, col.is_nullable);
+      ptr += 1;
+      mach_write_to_1(ptr, col.is_unsigned);
+      ptr += 1;
+      mach_write_to_4(ptr, col.char_length);
+      ptr += 4;
+      mach_write_to_4(ptr, static_cast<uint32_t>(col.dd_type));
+      ptr += 4;
+      mach_write_to_4(ptr, col.numeric_scale);
+      ptr += 4;
+      mach_write_to_8(ptr, col.collation_id);
+      if (!write_bytes(dropped_buf, sizeof(dropped_buf))) {
+        fclose(file);
+        return false;
+      }
+
+      if (col.dd_type == dd::enum_column_types::ENUM ||
+          col.dd_type == dd::enum_column_types::SET) {
+        const uint32_t elem_count =
+            static_cast<uint32_t>(col.elements.size());
+        if (!write_u32(elem_count)) {
+          fclose(file);
+          return false;
+        }
+        for (const auto& elem : col.elements) {
+          const uint32_t elem_len =
+              static_cast<uint32_t>(elem.size() + 1);
+          if (!write_u32(elem_len) ||
+              !write_bytes(elem.c_str(), elem_len)) {
+            fclose(file);
+            return false;
+          }
+        }
+      }
+    }
+
+    if (col.has_instant_default) {
+      byte flag = 1;
+      if (!write_bytes(&flag, 1)) {
+        fclose(file);
+        return false;
+      }
+      byte null_flag = col.instant_default_null ? 1 : 0;
+      if (!write_bytes(&null_flag, 1)) {
+        fclose(file);
+        return false;
+      }
+      if (!col.instant_default_null) {
+        const uint32_t len =
+            static_cast<uint32_t>(col.instant_default_value.size());
+        if (!write_u32(len) ||
+            (len > 0 &&
+             !write_bytes(col.instant_default_value.data(), len))) {
+          fclose(file);
+          return false;
+        }
+      }
+    } else {
+      byte flag = 0;
+      if (!write_bytes(&flag, 1)) {
+        fclose(file);
+        return false;
+      }
+    }
+  }
+
+  if (!write_u32(static_cast<uint32_t>(cfg.indexes.size()))) {
+    fclose(file);
+    return false;
+  }
+
+  for (const auto& index : cfg.indexes) {
+    if (!write_u64(index.id) || !write_u32(index.space) ||
+        !write_u32(index.page) || !write_u32(index.type) ||
+        !write_u32(index.trx_id_offset) ||
+        !write_u32(index.n_user_defined_cols) ||
+        !write_u32(index.n_uniq) || !write_u32(index.n_nullable) ||
+        !write_u32(index.n_fields)) {
+      fclose(file);
+      return false;
+    }
+
+    const uint32_t idx_len = static_cast<uint32_t>(index.name.size() + 1);
+    if (!write_u32(idx_len) || !write_bytes(index.name.c_str(), idx_len)) {
+      fclose(file);
+      return false;
+    }
+
+    for (const auto& field : index.fields) {
+      if (!write_u32(field.prefix_len) || !write_u32(field.fixed_len) ||
+          !write_u32(field.is_ascending)) {
+        fclose(file);
+        return false;
+      }
+
+      const uint32_t field_len =
+          static_cast<uint32_t>(field.name.size() + 1);
+      if (!write_u32(field_len) ||
+          !write_bytes(field.name.c_str(), field_len)) {
+        fclose(file);
+        return false;
+      }
+    }
+  }
+
+  if (fflush(file) != 0) {
+    fclose(file);
+    return false;
+  }
+
+  fclose(file);
   return true;
 }
 
@@ -950,7 +2517,8 @@ bool decompress_ibd(File in_fd, File out_fd)
 // ----------------------------------------------------------------
 // Experimental: rebuild compressed tablespace into 16KB pages
 // ----------------------------------------------------------------
-bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path)
+bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path,
+                              const char* cfg_out_path)
 {
   MY_STAT stat_info;
   if (my_fstat(in_fd, &stat_info) != 0) {
@@ -992,11 +2560,25 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
 
   std::vector<SdiEntry> sdi_entries;
   bool have_sdi_json = (sdi_json_path != nullptr);
+  bool want_cfg = (cfg_out_path != nullptr);
   page_no_t sdi_root_page = FIL_NULL;
   bool sdi_root_set = false;
+  uint32_t space_flags = 0;
+  bool space_flags_set = false;
+  SdiMetadata sdi_meta;
 
   if (have_sdi_json) {
     if (!load_sdi_json_entries(sdi_json_path, sdi_entries)) {
+      return false;
+    }
+  }
+
+  if (want_cfg) {
+    if (!have_sdi_json) {
+      fprintf(stderr, "Error: --cfg-out requires --sdi-json.\n");
+      return false;
+    }
+    if (!load_sdi_metadata(sdi_json_path, &sdi_meta)) {
       return false;
     }
   }
@@ -1057,6 +2639,8 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
                                                      &space_id)) {
         return false;
       }
+      space_flags = fsp_header_get_flags(out_buf.get());
+      space_flags_set = true;
 
       if (have_sdi_json) {
         if (!sdi_root_set || sdi_root_page >= num_pages) {
@@ -1124,6 +2708,30 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
   fprintf(stderr, "========================================\n");
   fprintf(stderr, "Output pages written: %llu\n", (unsigned long long)num_pages);
   fprintf(stderr, "========================================\n\n");
+
+  if (want_cfg) {
+    if (!space_flags_set) {
+      fprintf(stderr, "Error: space flags not captured for cfg output.\n");
+      return false;
+    }
+    if (FSP_FLAGS_HAS_SDI(space_flags) && !sdi_root_set) {
+      fprintf(stderr, "Error: SDI root page not set for cfg output.\n");
+      return false;
+    }
+
+    CfgTable cfg_table;
+    if (!build_cfg_table_from_sdi(sdi_meta, space_flags,
+                                  sdi_root_set ? sdi_root_page : FIL_NULL,
+                                  space_id, &cfg_table)) {
+      fprintf(stderr, "Error: failed to build cfg metadata.\n");
+      return false;
+    }
+    if (!write_cfg_file(cfg_out_path, cfg_table)) {
+      fprintf(stderr, "Error: failed to write cfg file.\n");
+      return false;
+    }
+    fprintf(stderr, "CFG written to: %s\n", cfg_out_path);
+  }
 
   return true;
 }

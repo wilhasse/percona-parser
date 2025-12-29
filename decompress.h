@@ -35,9 +35,11 @@ bool decompress_ibd(File in_fd, File out_fd);
  *   expands all pages to logical size, clears ZIP_SSIZE in FSP flags, updates
  *   space_id fields, and writes CRC32 checksums for 16KB pages.
  *   If sdi_json_path is provided, rebuilds the SDI root page from JSON.
+ *   If cfg_out_path is provided, writes a .cfg file from SDI metadata.
  */
 bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
-                              const char* sdi_json_path);
+                              const char* sdi_json_path,
+                              const char* cfg_out_path);
 
 bool determine_page_size(File file_in, page_size_t &page_sz);
 

@@ -36,7 +36,7 @@ Run with JSON output:
 
 ## Test Suite Overview
 
-The test suite (`tests/run_all_tests.sh`) runs 9 comprehensive tests:
+The test suite (`tests/run_all_tests.sh`) runs 10 comprehensive tests:
 
 | # | Test Name | Script | Description |
 |---|-----------|--------|-------------|
@@ -49,6 +49,7 @@ The test suite (`tests/run_all_tests.sh`) runs 9 comprehensive tests:
 | 7 | LOB_DECODING | `test_lob_decode.sh` | LONGTEXT/LONGBLOB external pages |
 | 8 | ZLOB_DECODING | `test_zlob_decode.sh` | Compressed LOB (ROW_FORMAT=COMPRESSED) |
 | 9 | SDI_REBUILD | `test_sdi_rebuild.sh` | Mode 5 full rebuild with SDI for MySQL import |
+| 10 | CFG_IMPORT | `test_cfg_import.sh` | Generate .cfg from SDI for instant-column import |
 
 ## Individual Test Details
 
@@ -146,6 +147,15 @@ Tests Mode 5 experimental full rebuild with `--sdi-json` flag (RES-22).
 
 **Expected result**: All 55 test rows recovered and queryable.
 
+### 10. CFG Import (`test_cfg_import.sh`)
+
+Validates `.cfg` generation with instant columns and `IMPORT TABLESPACE`.
+
+**What it tests**:
+- Rebuild compressed .ibd to uncompressed pages
+- Generate `.cfg` via `--cfg-out`
+- Import into an instant-column table
+
 ## Test Output
 
 ### Normal Mode
@@ -164,8 +174,8 @@ Running: ENCRYPTED_TABLES
 ==========================================
 TEST SUITE SUMMARY
 ==========================================
-Total tests run: 9
-Passed: 9
+Total tests run: 10
+Passed: 10
 Failed: 0
 Duration: 180s
 
@@ -181,8 +191,8 @@ Duration: 180s
   "duration_seconds": 180,
   "status": "passed",
   "summary": {
-    "total": 9,
-    "passed": 9,
+    "total": 10,
+    "passed": 10,
     "failed": 0
   },
   "tests": [

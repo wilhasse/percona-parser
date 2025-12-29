@@ -248,7 +248,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
 {
   if (argc < 3) {
     std::cerr << "Usage for mode=5 (rebuild-uncompressed):\n"
-              << "  ib_parser 5 <in_file> <out_file> [--sdi-json=PATH]\n";
+              << "  ib_parser 5 <in_file> <out_file> [--sdi-json=PATH] [--cfg-out=PATH]\n";
     return 1;
   }
 
@@ -259,6 +259,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
   const char* in_file  = argv[1];
   const char* out_file = argv[2];
   const char* sdi_json = nullptr;
+  const char* cfg_out = nullptr;
 
   for (int i = 3; i < argc; ++i) {
     const char* arg = argv[i];
@@ -268,6 +269,14 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
     }
     if (strcmp(arg, "--sdi-json") == 0 && i + 1 < argc) {
       sdi_json = argv[++i];
+      continue;
+    }
+    if (strncmp(arg, "--cfg-out=", 10) == 0) {
+      cfg_out = arg + 10;
+      continue;
+    }
+    if (strcmp(arg, "--cfg-out") == 0 && i + 1 < argc) {
+      cfg_out = argv[++i];
       continue;
     }
     std::cerr << "Unknown option: " << arg << "\n";
@@ -286,7 +295,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
     return 1;
   }
 
-  bool ok = rebuild_uncompressed_ibd(in_fd, out_fd, sdi_json);
+  bool ok = rebuild_uncompressed_ibd(in_fd, out_fd, sdi_json, cfg_out);
   my_close(in_fd, MYF(0));
   my_close(out_fd, MYF(0));
   return ok ? 0 : 1;

@@ -137,6 +137,7 @@ if [ "$JSON_OUTPUT" != "true" ] || [ "$VERBOSE" = "true" ]; then
     echo "7. LOB external decoding (LONGTEXT, LONGBLOB)"
     echo "8. ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)"
     echo "9. SDI rebuild (Mode 5 with --sdi-json)"
+    echo "10. CFG import (instant columns via --cfg-out)"
     echo ""
     if [ "$VERBOSE" = "true" ]; then
         echo -e "${CYAN}Verbose mode enabled - showing real-time output${NC}"
@@ -275,6 +276,15 @@ fi
 # Test 9: SDI rebuild (Mode 5 with --sdi-json)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "SDI_REBUILD" "$SCRIPT_DIR/test_sdi_rebuild.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+[ "$JSON_OUTPUT" != "true" ] && echo ""
+
+# Test 10: CFG import (instant columns via --cfg-out)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "CFG_IMPORT" "$SCRIPT_DIR/test_cfg_import.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
     FAILED_TESTS=$((FAILED_TESTS + 1))

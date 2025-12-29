@@ -10,6 +10,7 @@ InnoDB single-table tablespaces (.ibd) for recovery and research.
 - Parse clustered index leaf records into pipe, CSV, or JSONL output.
 - Decode LOB/ZLOB, JSON binary columns, charset-aware text, and DATETIME.
 - Experimental rebuild to 16KB pages with optional SDI rebuild for import.
+- Generate .cfg from SDI for IMPORT TABLESPACE (instant/row-version tables).
 - C API for integrations (see `lib/`).
 
 ## Quick Start
@@ -30,7 +31,7 @@ ibd2sdi table.ibd > table_sdi.json
 Decompress or rebuild:
 ```bash
 ./build/ib_parser 2 compressed.ibd decompressed.ibd
-./build/ib_parser 5 compressed.ibd rebuilt.ibd --sdi-json=table_sdi.json
+./build/ib_parser 5 compressed.ibd rebuilt.ibd --sdi-json=table_sdi.json --cfg-out=table.cfg
 ```
 
 ## Limitations
@@ -40,7 +41,7 @@ Decompress or rebuild:
 - MySQL 8+ format; older layouts are not supported.
 - Parses clustered index leaf records only; secondary indexes are not parsed.
 - SDI rebuild supports in-page SDI; external SDI BLOB/ZBLOB not yet handled.
-- Import without a .cfg may fail on instant/row-version tables or schema drift.
+- .cfg generation requires SDI JSON; import without .cfg may fail on instant tables.
 
 ## Docs and Tests
 
