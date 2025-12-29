@@ -68,7 +68,10 @@ inline void my_rec_offs_set_n_fields(ulint* offsets, ulint n) {
 /** my_rec_offs_nth_size() => returns length for i-th field. */
 inline ulint my_rec_offs_nth_size(const ulint* offsets, ulint i) {
   ulint end   = (offsets[i+1] & ~(REC_OFFS_SQL_NULL | REC_OFFS_EXTERNAL));
-  ulint start = (offsets[i]   & ~(REC_OFFS_SQL_NULL | REC_OFFS_EXTERNAL));
+  ulint start = 0;
+  if (i > 0) {
+    start = (offsets[i] & ~(REC_OFFS_SQL_NULL | REC_OFFS_EXTERNAL));
+  }
   if (end < start) {
     return UNIV_SQL_NULL;
   }
@@ -84,10 +87,11 @@ inline bool my_rec_offs_nth_extern(const ulint* offsets, ulint i) {
 inline ulint my_rec_offs_data_size(const ulint* offsets) {
   ulint n = offsets[0];
   // For example, end=offsets[n], start=offsets[1]
+  if (n == 0) {
+    return 0;
+  }
   ulint end   = (offsets[n] & ~(REC_OFFS_SQL_NULL | REC_OFFS_EXTERNAL));
-  ulint start = (offsets[1] & ~(REC_OFFS_SQL_NULL | REC_OFFS_EXTERNAL));
-  if (end < start) return 0;
-  return end - start;
+  return end;
 }
 
 /** my_rec_get_nth_field() => returns pointer and length for i-th field. */
@@ -96,7 +100,7 @@ my_rec_get_nth_field(const rec_t* rec, const ulint* offsets,
                      ulint i, ulint* len)
 {
   ulint end_bits   = offsets[i+1];
-  ulint start_bits = offsets[i];
+  ulint start_bits = (i == 0) ? 0 : offsets[i];
 
   bool is_null    = (end_bits   & REC_OFFS_SQL_NULL) != 0;
   bool is_extern  = (end_bits   & REC_OFFS_EXTERNAL) != 0;
