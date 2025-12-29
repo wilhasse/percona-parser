@@ -19,6 +19,13 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name);
 
 int build_table_def_from_json(table_def_t* table, const char* tbl_name);
 
+bool parser_debug_enabled();
+
+bool format_innodb_datetime(const unsigned char* ptr, ulint len,
+                            unsigned int dec, std::string& out);
+bool format_innodb_timestamp(const unsigned char* ptr, ulint len,
+                             unsigned int dec, std::string& out);
+
 void debug_print_table_def(const table_def_t *table);
 
 void debug_print_compact_row(const page_t* page,

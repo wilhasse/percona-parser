@@ -19,6 +19,7 @@
 #include "univ.i"
 #include "page0page.h"
 #include "rem0rec.h"
+#include "parser.h"
 
 // Undefine MySQL rec_offs_* if they exist
 #ifdef rec_offs_nth_size
@@ -315,15 +316,21 @@ static void print_text(const unsigned char* ptr, ulint len, ulint max_len = 256)
 ulint process_ibrec(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets, bool hex)
 {
   (void)page; // not used here
+  const bool show_internal = parser_debug_enabled();
 
   // Print header once:
   if (!g_printed_header) {
     // cast to ulint to avoid sign-compare warning
+    ulint printed = 0;
     for (ulint i = 0; i < (ulint)table->fields_count; i++) {
-      printf("%s", table->fields[i].name);
-      if (i < (ulint)(table->fields_count - 1)) {
+      if (!show_internal && table->fields[i].type == FT_INTERNAL) {
+        continue;
+      }
+      if (printed > 0) {
         printf("|");
       }
+      printf("%s", table->fields[i].name);
+      printed++;
     }
     printf("\n");
     g_printed_header = true;
@@ -332,10 +339,18 @@ ulint process_ibrec(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets
   // Print each column
   ulint data_size = my_rec_offs_data_size(offsets);
 
+  ulint printed = 0;
   for (ulint i = 0; i < (ulint)table->fields_count; i++) {
+    if (!show_internal && table->fields[i].type == FT_INTERNAL) {
+      continue;
+    }
     ulint field_len;
     const unsigned char* field_ptr = my_rec_get_nth_field(rec, offsets, i, &field_len);
     bool is_extern = my_rec_offs_nth_extern(offsets, i);
+
+    if (printed > 0) {
+      printf("|");
+    }
 
     if (field_len == UNIV_SQL_NULL) {
       // print "NULL"
@@ -393,6 +408,22 @@ ulint process_ibrec(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets
           case FT_TIME:
           case FT_DATETIME:
           case FT_TIMESTAMP:
+          {
+            std::string formatted;
+            unsigned int dec = static_cast<unsigned int>(table->fields[i].time_precision);
+            bool ok = false;
+            if (table->fields[i].type == FT_DATETIME) {
+              ok = format_innodb_datetime(field_ptr, field_len, dec, formatted);
+            } else {
+              ok = format_innodb_timestamp(field_ptr, field_len, dec, formatted);
+            }
+            if (ok) {
+              printf("%s", formatted.c_str());
+            } else {
+              print_hex(field_ptr, field_len);
+            }
+            break;
+          }
           case FT_ENUM:
           case FT_SET:
           case FT_BIT:
@@ -404,9 +435,7 @@ ulint process_ibrec(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets
       }
     }
 
-    if (i < (ulint)(table->fields_count - 1)) {
-      printf("|");
-    }
+    printed++;
   }
   printf("\n");
 

@@ -5,6 +5,7 @@
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <ctime>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,7 @@
 #include "mach0data.h"  // mach_read_from_8(), mach_read_from_4()
 #include "fsp0fsp.h"    // FSP_SPACE_ID
 #include "fsp0types.h"  // btr_root_fseg_validate() signature
+#include "my_time.h"
 
 #include "tables_dict.h"
 #include "undrop_for_innodb.h"
@@ -113,6 +115,112 @@ static bool btr_root_fseg_validate(const unsigned char* page, uint32_t space_id)
  */
 static inline uint64_t read_uint64_from_page(const unsigned char* ptr) {
   return mach_read_from_8(ptr);
+}
+
+bool parser_debug_enabled() {
+  static int cached = -1;
+  if (cached != -1) {
+    return cached == 1;
+  }
+  const char* env = std::getenv("IB_PARSER_DEBUG");
+  cached = (env && *env && std::strcmp(env, "0") != 0) ? 1 : 0;
+  return cached == 1;
+}
+
+static void init_parser_timezone() {
+  static bool initialized = false;
+  if (initialized) {
+    return;
+  }
+  const char* tz = std::getenv("IB_PARSER_TZ");
+  if (!tz || *tz == '\0') {
+    tz = "America/Sao_Paulo";
+  }
+  setenv("TZ", tz, 1);
+  tzset();
+  initialized = true;
+}
+
+static unsigned int max_decimals_from_len(ulint len, ulint base_len) {
+  if (len <= base_len) {
+    return 0;
+  }
+  ulint frac_bytes = len - base_len;
+  unsigned int max_dec = static_cast<unsigned int>(frac_bytes * 2);
+  if (max_dec > 6) {
+    max_dec = 6;
+  }
+  return max_dec;
+}
+
+bool format_innodb_datetime(const unsigned char* ptr, ulint len,
+                            unsigned int dec, std::string& out) {
+  if (!ptr || len < 5) {
+    return false;
+  }
+  if (dec > 6) {
+    dec = 6;
+  }
+  unsigned int max_dec = max_decimals_from_len(len, 5);
+  if (dec > max_dec) {
+    dec = max_dec;
+  }
+  longlong packed = my_datetime_packed_from_binary(ptr, dec);
+  MYSQL_TIME tm{};
+  TIME_from_longlong_datetime_packed(&tm, packed);
+  char buf[MAX_DATE_STRING_REP_LENGTH];
+  int n = my_datetime_to_str(tm, buf, dec);
+  out.assign(buf, static_cast<size_t>(n));
+  return true;
+}
+
+static int pow10_int(int exp) {
+  int val = 1;
+  for (int i = 0; i < exp; i++) {
+    val *= 10;
+  }
+  return val;
+}
+
+bool format_innodb_timestamp(const unsigned char* ptr, ulint len,
+                             unsigned int dec, std::string& out) {
+  if (!ptr || len < 4) {
+    return false;
+  }
+  if (dec > 6) {
+    dec = 6;
+  }
+  unsigned int max_dec = max_decimals_from_len(len, 4);
+  if (dec > max_dec) {
+    dec = max_dec;
+  }
+
+  init_parser_timezone();
+  my_timeval tv{};
+  my_timestamp_from_binary(&tv, ptr, dec);
+  time_t secs = static_cast<time_t>(tv.m_tv_sec);
+  struct tm local_tm;
+  if (!localtime_r(&secs, &local_tm)) {
+    return false;
+  }
+
+  char buf[64];
+  int n = std::snprintf(buf, sizeof(buf),
+                        "%04d-%02d-%02d %02d:%02d:%02d",
+                        local_tm.tm_year + 1900,
+                        local_tm.tm_mon + 1,
+                        local_tm.tm_mday,
+                        local_tm.tm_hour,
+                        local_tm.tm_min,
+                        local_tm.tm_sec);
+  if (dec > 0) {
+    int scale = pow10_int(6 - static_cast<int>(dec));
+    int frac = static_cast<int>(tv.m_tv_usec / scale);
+    n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n),
+                       ".%0*d", dec, frac);
+  }
+  out.assign(buf, static_cast<size_t>(n));
+  return true;
 }
 
 struct IndexElement {
@@ -321,33 +429,31 @@ void debug_print_compact_row(const page_t* page,
             break;
 
         case FT_DATETIME:
-            // If we treat it as 5 or 8 bytes, let's do a mini decode
-            if (field_len == 5) {
-                // e.g. MySQL 5.6 DATETIME(0) in "COMPACT" 
-                // This is advanced, but let's just hex dump for now:
-                printf("  [%2lu] %-15s => (DATETIME-5) => ",
-                       i, table->fields[i].name);
-                for (ulint k=0; k<field_len; k++) {
-                    printf("%02X ", field_ptr[k]);
+        case FT_TIMESTAMP:
+            {
+                std::string formatted;
+                unsigned int dec = static_cast<unsigned int>(table->fields[i].time_precision);
+                bool ok = false;
+                if (table->fields[i].type == FT_DATETIME) {
+                    ok = format_innodb_datetime(field_ptr, field_len, dec, formatted);
+                } else {
+                    ok = format_innodb_timestamp(field_ptr, field_len, dec, formatted);
                 }
-                printf("\n");
-            } else if (field_len == 8) {
-                // older DATETIME
-                // same approach
-                printf("  [%2lu] %-15s => (DATETIME-8) => ",
-                       i, table->fields[i].name);
-                for (ulint k=0; k<8; k++) {
-                    printf("%02X ", field_ptr[k]);
+                if (ok) {
+                    printf("  [%2lu] %-15s => (%s) %s\n",
+                           i, table->fields[i].name,
+                           table->fields[i].type == FT_DATETIME ? "DATETIME" : "TIMESTAMP",
+                           formatted.c_str());
+                } else {
+                    printf("  [%2lu] %-15s => (%s) length=%lu => raw hex ",
+                           i, table->fields[i].name,
+                           table->fields[i].type == FT_DATETIME ? "DATETIME" : "TIMESTAMP",
+                           (unsigned long)field_len);
+                    for (ulint k = 0; k < field_len && k < 16; k++) {
+                        printf("%02X ", field_ptr[k]);
+                    }
+                    printf("\n");
                 }
-                printf("\n");
-            } else {
-                // fallback
-                printf("  [%2lu] %-15s => (DATETIME) length=%lu => raw hex ",
-                       i, table->fields[i].name, (unsigned long)field_len);
-                for (ulint k=0; k<field_len && k<16; k++) {
-                    printf("%02X ", field_ptr[k]);
-                }
-                printf("\n");
             }
             break;
 
@@ -1191,7 +1297,9 @@ void parse_records_on_page(const unsigned char* page,
             offsets);
 
         if (valid) {
-          debug_print_compact_row(page, rec, table, offsets);
+          if (parser_debug_enabled()) {
+            debug_print_compact_row(page, rec, table, offsets);
+          }
           bool hex_output = false;
           process_ibrec((page_t*)page, (rec_t*)rec, table, offsets, hex_output);
         } else {

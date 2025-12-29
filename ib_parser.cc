@@ -366,7 +366,9 @@ static int do_parse_main(int argc, char** argv)
   table_definitions[0] = my_table;
   table_definitions_cnt = 1;
   init_table_defs(1);
-  debug_print_table_def(&my_table);
+  if (parser_debug_enabled()) {
+    debug_print_table_def(&my_table);
+  }
 
   // 7) Allocate buffers
   std::unique_ptr<unsigned char[]> page_buf(new unsigned char[physical_page_size]);
