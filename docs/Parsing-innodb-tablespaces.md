@@ -114,8 +114,8 @@ mysql -uroot test_import -e "ALTER TABLE mytable IMPORT TABLESPACE;"
 5. **SDI record format is special**
    * SDI records store type + id + trx/roll pointers + zlib-compressed JSON.
    * Rebuilding SDI requires correct record headers and directory slots.
-6. **External SDI BLOB pages are not handled yet**
-   * Current rebuild assumes the SDI JSON fits in-page (no SDI BLOB/ZBLOB).
+6. **External SDI BLOB pages are handled**
+   * Rebuild emits SDI BLOB pages when the SDI record does not fit in-page.
 7. **Only clustered index rows are parsed**
    * Secondary indexes are not parsed or reconstructed.
 
@@ -123,17 +123,17 @@ mysql -uroot test_import -e "ALTER TABLE mytable IMPORT TABLESPACE;"
 
 * Decrypt, decompress, and parse clustered index leaf rows.
 * Decode LOB/ZLOB, JSON binary, charset-aware text, DATETIME.
-* Rebuild compressed tablespaces to 16KB with SDI restored (in-page SDI).
+* Rebuild compressed tablespaces to 16KB with SDI restored (in-page or external).
 
 # Open Work / Next Steps
 
-* Add .cfg generation from SDI for more reliable imports.
-* Handle external SDI BLOB/ZBLOB pages.
+* Harden .cfg generation for instant/row-version edge cases.
 * Add secondary index parsing or reconstruction.
 * Improve diagnostics for index-id mismatches during import.
 
 # References in the repo
 
 * `tests/test_sdi_rebuild.sh` (end-to-end rebuild + import)
+* `tests/test_sdi_external.sh` (external SDI BLOB rebuild)
 * `tests/test_types_decode.sh`, `test_charset_decode.sh`, `test_json_decode.sh`
 * `docs/Architecture.md`, `docs/Testing.md`

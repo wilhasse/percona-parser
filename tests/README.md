@@ -15,6 +15,9 @@ This directory contains test scripts for validating the ib_parser tool's functio
 | `test_json_decode.sh` | ✅ **Working** | Validates JSON binary decoding for JSON columns | MySQL 8.0+ + ibd2sdi |
 | `test_lob_decode.sh` | ✅ **Working** | Validates external LOB (TEXT/BLOB) reconstruction | MySQL 8.0+ + ibd2sdi |
 | `test_zlob_decode.sh` | ✅ **Working** | Validates compressed LOB (ZLOB) reconstruction | MySQL 8.0+ + ibd2sdi |
+| `test_sdi_rebuild.sh` | ✅ **Working** | Mode 5 rebuild with SDI for MySQL import | MySQL 8.0+ + ibd2sdi |
+| `test_sdi_external.sh` | ✅ **Working** | Rebuild with external SDI BLOB pages | MySQL 8.0+ + ibd2sdi |
+| `test_cfg_import.sh` | ✅ **Working** | Generate .cfg from SDI for instant-column import | MySQL 8.0+ + ibd2sdi |
 | `run_all_tests.sh` | ✅ **Working** | Runs all test scripts sequentially | All of the above |
 
 ### Status Legend:

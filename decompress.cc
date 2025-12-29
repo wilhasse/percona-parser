@@ -439,6 +439,26 @@ constexpr uint32_t kSdiRecOffUncompLen =
     kSdiRecOffRollPtr + DATA_ROLL_PTR_LEN;
 constexpr uint32_t kSdiRecOffCompLen = kSdiRecOffUncompLen + kSdiRecUncompLen;
 constexpr uint32_t kSdiRecOffVar = kSdiRecOffCompLen + kSdiRecCompLen;
+constexpr uint32_t kSdiExternRefSize = FIELD_REF_SIZE;
+constexpr uint32_t kSdiExternSpaceId = 0;
+constexpr uint32_t kSdiExternPageNo = 4;
+constexpr uint32_t kSdiExternOffset = 8;
+constexpr uint32_t kSdiExternLen = 12;
+constexpr uint32_t kSdiLobHdrPartLen = 0;
+constexpr uint32_t kSdiLobHdrNextPageNo = 4;
+constexpr uint32_t kSdiLobHdrSize = 8;
+
+struct SdiBlobAlloc {
+  const std::vector<page_no_t>* pages{nullptr};
+  size_t next{0};
+  size_t page_size{0};
+  space_id_t space_id{SPACE_UNKNOWN};
+  std::unordered_map<page_no_t, std::vector<byte>>* out_pages{nullptr};
+};
+
+static void stamp_page_lsn_and_crc32(unsigned char* page,
+                                     size_t page_size,
+                                     uint64_t lsn);
 
 static bool sdi_read_uint64(const rapidjson::Value& val, uint64_t* out) {
   if (val.IsUint64()) {
@@ -2205,6 +2225,116 @@ static std::vector<ulint> build_dir_groups(size_t user_recs) {
   return groups;
 }
 
+static size_t sdi_blob_payload_size(size_t page_size) {
+  if (page_size <= FIL_PAGE_DATA + kSdiLobHdrSize + FIL_PAGE_END_LSN_OLD_CHKSUM) {
+    return 0;
+  }
+  return page_size - FIL_PAGE_DATA - kSdiLobHdrSize -
+         FIL_PAGE_END_LSN_OLD_CHKSUM;
+}
+
+static bool emit_sdi_blob_chain(SdiBlobAlloc* alloc,
+                                const std::vector<byte>& comp,
+                                page_no_t* first_page_out) {
+  if (alloc == nullptr || alloc->pages == nullptr || alloc->out_pages == nullptr) {
+    fprintf(stderr, "Error: SDI blob allocator not configured.\n");
+    return false;
+  }
+
+  const size_t payload_size = sdi_blob_payload_size(alloc->page_size);
+  if (payload_size == 0) {
+    fprintf(stderr, "Error: invalid SDI blob page size %zu.\n", alloc->page_size);
+    return false;
+  }
+
+  if (comp.empty()) {
+    fprintf(stderr, "Error: SDI compressed payload is empty.\n");
+    return false;
+  }
+
+  size_t remaining = comp.size();
+  size_t offset = 0;
+  page_no_t first_page = FIL_NULL;
+
+  while (remaining > 0) {
+    if (alloc->next >= alloc->pages->size()) {
+      fprintf(stderr,
+              "Error: not enough SDI blob pages (need %zu bytes).\n",
+              comp.size());
+      return false;
+    }
+
+    page_no_t page_no = (*alloc->pages)[alloc->next++];
+    if (first_page == FIL_NULL) {
+      first_page = page_no;
+    }
+
+    std::vector<byte> page(alloc->page_size);
+    memset(page.data(), 0, page.size());
+    mach_write_to_4(page.data() + FIL_PAGE_OFFSET, page_no);
+    mach_write_to_4(page.data() + FIL_PAGE_PREV, FIL_NULL);
+    mach_write_to_4(page.data() + FIL_PAGE_NEXT, FIL_NULL);
+    mach_write_to_2(page.data() + FIL_PAGE_TYPE, FIL_PAGE_SDI_BLOB);
+    mach_write_to_4(page.data() + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID,
+                    alloc->space_id);
+
+    const size_t part_len = std::min(payload_size, remaining);
+    const page_no_t next_page =
+        (remaining > part_len && alloc->next < alloc->pages->size())
+            ? (*alloc->pages)[alloc->next]
+            : FIL_NULL;
+
+    byte* data = page.data() + FIL_PAGE_DATA;
+    mach_write_to_4(data + kSdiLobHdrPartLen,
+                    static_cast<uint32_t>(part_len));
+    mach_write_to_4(data + kSdiLobHdrNextPageNo, next_page);
+    memcpy(data + kSdiLobHdrSize, comp.data() + offset, part_len);
+
+    stamp_page_lsn_and_crc32(page.data(), alloc->page_size, 0);
+    (*alloc->out_pages)[page_no] = std::move(page);
+
+    remaining -= part_len;
+    offset += part_len;
+  }
+
+  if (first_page_out != nullptr) {
+    *first_page_out = first_page;
+  }
+  return true;
+}
+
+static bool collect_sdi_blob_pages(File in_fd, const page_size_t& page_sz,
+                                   uint64_t num_pages,
+                                   std::vector<page_no_t>* pages) {
+  if (pages == nullptr) {
+    return false;
+  }
+  pages->clear();
+
+  const size_t physical_size = page_sz.physical();
+  std::unique_ptr<unsigned char[]> buf(new unsigned char[physical_size]);
+
+  for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
+    if (!seek_page(in_fd, page_sz, static_cast<page_no_t>(page_no))) {
+      return false;
+    }
+
+    size_t r = my_read(in_fd, buf.get(), physical_size, MYF(0));
+    if (r != physical_size) {
+      fprintf(stderr, "Failed to read page %llu during SDI scan.\n",
+              (unsigned long long)page_no);
+      return false;
+    }
+
+    const uint16_t page_type = mach_read_from_2(buf.get() + FIL_PAGE_TYPE);
+    if (page_type == FIL_PAGE_SDI_BLOB || page_type == FIL_PAGE_SDI_ZBLOB) {
+      pages->push_back(static_cast<page_no_t>(page_no));
+    }
+  }
+
+  return true;
+}
+
 static void init_empty_sdi_page(byte* page, size_t page_size,
                                 page_no_t page_no) {
   memset(page, 0, page_size);
@@ -2232,7 +2362,8 @@ static void init_empty_sdi_page(byte* page, size_t page_size,
 }
 
 static bool populate_sdi_root_page(byte* page, size_t page_size,
-                                   const std::vector<SdiEntry>& entries) {
+                                   const std::vector<SdiEntry>& entries,
+                                   SdiBlobAlloc* blob_alloc) {
   struct RecInfo {
     byte* rec;
     uint16_t offs;
@@ -2255,16 +2386,51 @@ static bool populate_sdi_root_page(byte* page, size_t page_size,
     }
 
     const uint32_t uncomp_len = static_cast<uint32_t>(entries[i].json.size());
+
+    bool use_external = false;
+    size_t len_bytes = 0;
+    size_t rec_data_len = 0;
+    size_t rec_size = 0;
+    page_no_t first_blob_page = FIL_NULL;
+
     if (comp_len > 0x3fff) {
-      fprintf(stderr,
-              "Error: SDI record too large for in-page storage (%u bytes)\n",
-              comp_len);
-      return false;
+      use_external = true;
+    } else {
+      len_bytes = (comp_len <= 127) ? 1 : 2;
+      rec_data_len = kSdiRecOffVar + comp_len;
+      rec_size = kSdiRecHeaderSize + len_bytes + rec_data_len;
+      if (heap_top + rec_size > dir_start) {
+        use_external = true;
+      }
     }
 
-    const size_t len_bytes = (comp_len <= 127) ? 1 : 2;
-    const size_t rec_data_len = kSdiRecOffVar + comp_len;
-    const size_t rec_size = kSdiRecHeaderSize + len_bytes + rec_data_len;
+    if (use_external) {
+      if (blob_alloc == nullptr) {
+        fprintf(stderr,
+                "Error: SDI record requires external storage but no SDI "
+                "blob pages are available.\n");
+        return false;
+      }
+
+      const size_t local_prefix = 0;
+      len_bytes = 2;
+      rec_data_len = kSdiRecOffVar + local_prefix + kSdiExternRefSize;
+      rec_size = kSdiRecHeaderSize + len_bytes + rec_data_len;
+
+      if (heap_top + rec_size > dir_start) {
+        fprintf(stderr,
+                "Error: SDI external records exceed SDI root page capacity\n");
+        return false;
+      }
+
+      if (!emit_sdi_blob_chain(blob_alloc, comp, &first_blob_page)) {
+        return false;
+      }
+      if (first_blob_page == FIL_NULL) {
+        fprintf(stderr, "Error: SDI external chain did not allocate a page.\n");
+        return false;
+      }
+    }
 
     if (heap_top + rec_size > dir_start) {
       fprintf(stderr, "Error: SDI records exceed SDI root page capacity\n");
@@ -2275,7 +2441,10 @@ static bool populate_sdi_root_page(byte* page, size_t page_size,
     byte* rec = rec_base + len_bytes + kSdiRecHeaderSize;
     memset(rec_base, 0, rec_size);
 
-    if (len_bytes == 1) {
+    if (use_external) {
+      rec_base[0] = 0;
+      rec_base[1] = static_cast<byte>(0xC0);
+    } else if (len_bytes == 1) {
       rec_base[0] = static_cast<byte>(comp_len);
     } else {
       rec_base[0] = static_cast<byte>(comp_len & 0xFF);
@@ -2292,7 +2461,16 @@ static bool populate_sdi_root_page(byte* page, size_t page_size,
     mach_write_to_7(rec + kSdiRecOffRollPtr, 0);
     mach_write_to_4(rec + kSdiRecOffUncompLen, uncomp_len);
     mach_write_to_4(rec + kSdiRecOffCompLen, comp_len);
-    memcpy(rec + kSdiRecOffVar, comp.data(), comp_len);
+    if (use_external) {
+      byte* ref = rec + kSdiRecOffVar;
+      memset(ref, 0, kSdiExternRefSize);
+      mach_write_to_4(ref + kSdiExternSpaceId, blob_alloc->space_id);
+      mach_write_to_4(ref + kSdiExternPageNo, first_blob_page);
+      mach_write_to_4(ref + kSdiExternOffset, FIL_PAGE_DATA);
+      mach_write_to_8(ref + kSdiExternLen, static_cast<uint64_t>(comp_len));
+    } else {
+      memcpy(rec + kSdiRecOffVar, comp.data(), comp_len);
+    }
 
     const uint16_t rec_off = static_cast<uint16_t>(rec - page);
     recs.push_back(RecInfo{rec, rec_off});
@@ -2536,6 +2714,8 @@ static const char* get_page_type_name(uint16_t page_type) {
         case 10: return "FIL_PAGE_TYPE_BLOB";
         case 11: return "FIL_PAGE_TYPE_ZBLOB";
         case 12: return "FIL_PAGE_TYPE_ZBLOB2";
+        case FIL_PAGE_SDI_BLOB: return "FIL_PAGE_SDI_BLOB";
+        case FIL_PAGE_SDI_ZBLOB: return "FIL_PAGE_SDI_ZBLOB";
         case 14: return "FIL_PAGE_COMPRESSED";
         case 15: return "FIL_PAGE_ENCRYPTED";
         case 16: return "FIL_PAGE_COMPRESSED_AND_ENCRYPTED";
@@ -2766,6 +2946,8 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
   std::unique_ptr<unsigned char[]> out_buf(new unsigned char[logical_size]);
 
   std::vector<SdiEntry> sdi_entries;
+  std::vector<page_no_t> sdi_blob_pages;
+  std::unordered_map<page_no_t, std::vector<byte>> sdi_blob_output;
   bool have_sdi_json = (sdi_json_path != nullptr);
   bool want_cfg = (cfg_out_path != nullptr);
   page_no_t sdi_root_page = FIL_NULL;
@@ -2776,6 +2958,9 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
 
   if (have_sdi_json) {
     if (!load_sdi_json_entries(sdi_json_path, sdi_entries)) {
+      return false;
+    }
+    if (!collect_sdi_blob_pages(in_fd, pg_sz, num_pages, &sdi_blob_pages)) {
       return false;
     }
   }
@@ -2886,7 +3071,19 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
       memcpy(out_buf.get() + FIL_PAGE_DATA + PAGE_BTR_SEG_TOP, fseg_top,
              FSEG_HEADER_SIZE);
 
-      if (!populate_sdi_root_page(out_buf.get(), logical_size, sdi_entries)) {
+      SdiBlobAlloc blob_alloc;
+      SdiBlobAlloc* blob_alloc_ptr = nullptr;
+      if (!sdi_blob_pages.empty()) {
+        blob_alloc.pages = &sdi_blob_pages;
+        blob_alloc.next = 0;
+        blob_alloc.page_size = logical_size;
+        blob_alloc.space_id = space_id;
+        blob_alloc.out_pages = &sdi_blob_output;
+        blob_alloc_ptr = &blob_alloc;
+      }
+
+      if (!populate_sdi_root_page(out_buf.get(), logical_size, sdi_entries,
+                                  blob_alloc_ptr)) {
         fprintf(stderr, "Error: SDI root page rebuild failed.\n");
         return false;
       }
@@ -2907,6 +3104,33 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
               (unsigned long long)(page_no + 1),
               (unsigned long long)num_pages,
               100.0 * (page_no + 1) / num_pages);
+    }
+  }
+
+  if (!sdi_blob_output.empty()) {
+    for (const auto& entry : sdi_blob_output) {
+      const page_no_t page_no = entry.first;
+      const std::vector<byte>& page = entry.second;
+      if (page.size() != logical_size) {
+        fprintf(stderr,
+                "Error: SDI blob page %u size mismatch (%zu != %zu).\n",
+                page_no, page.size(), logical_size);
+        return false;
+      }
+
+      const my_off_t offset =
+          static_cast<my_off_t>(page_no) * static_cast<my_off_t>(logical_size);
+      if (my_seek(out_fd, offset, MY_SEEK_SET, MYF(0)) == MY_FILEPOS_ERROR) {
+        fprintf(stderr,
+                "Error: my_seek failed for SDI blob page %u. Errno=%d (%s)\n",
+                page_no, errno, strerror(errno));
+        return false;
+      }
+      size_t w = my_write(out_fd, (uchar*)page.data(), logical_size, MYF(0));
+      if (w != logical_size) {
+        fprintf(stderr, "Failed to write SDI blob page %u.\n", page_no);
+        return false;
+      }
     }
   }
 

@@ -36,7 +36,7 @@ Run with JSON output:
 
 ## Test Suite Overview
 
-The test suite (`tests/run_all_tests.sh`) runs 10 comprehensive tests:
+The test suite (`tests/run_all_tests.sh`) runs 11 comprehensive tests:
 
 | # | Test Name | Script | Description |
 |---|-----------|--------|-------------|
@@ -49,7 +49,8 @@ The test suite (`tests/run_all_tests.sh`) runs 10 comprehensive tests:
 | 7 | LOB_DECODING | `test_lob_decode.sh` | LONGTEXT/LONGBLOB external pages |
 | 8 | ZLOB_DECODING | `test_zlob_decode.sh` | Compressed LOB (ROW_FORMAT=COMPRESSED) |
 | 9 | SDI_REBUILD | `test_sdi_rebuild.sh` | Mode 5 full rebuild with SDI for MySQL import |
-| 10 | CFG_IMPORT | `test_cfg_import.sh` | Generate .cfg from SDI for instant-column import |
+| 10 | SDI_EXTERNAL | `test_sdi_external.sh` | SDI rebuild with external SDI BLOB pages |
+| 11 | CFG_IMPORT | `test_cfg_import.sh` | Generate .cfg from SDI for instant-column import |
 
 ## Individual Test Details
 
@@ -147,7 +148,17 @@ Tests Mode 5 experimental full rebuild with `--sdi-json` flag (RES-22).
 
 **Expected result**: All 55 test rows recovered and queryable.
 
-### 10. CFG Import (`test_cfg_import.sh`)
+### 10. SDI External (`test_sdi_external.sh`)
+
+Validates SDI rebuild when SDI data is stored externally (SDI BLOB pages).
+
+**What it tests**:
+- Create a wide compressed table to force external SDI
+- Rebuild with `--sdi-json`
+- Verify `ibd2sdi` reads the rebuilt file
+- Confirm SDI BLOB pages via `innochecksum -S`
+
+### 11. CFG Import (`test_cfg_import.sh`)
 
 Validates `.cfg` generation with instant columns and `IMPORT TABLESPACE`.
 
@@ -174,8 +185,8 @@ Running: ENCRYPTED_TABLES
 ==========================================
 TEST SUITE SUMMARY
 ==========================================
-Total tests run: 10
-Passed: 10
+Total tests run: 11
+Passed: 11
 Failed: 0
 Duration: 180s
 
@@ -224,6 +235,7 @@ cat tests/logs/FAILED_TEST_*.log
 # Run specific test directly
 ./tests/test_compressed.sh
 ./tests/test_sdi_rebuild.sh
+./tests/test_sdi_external.sh
 
 # Run with environment variable for verbose output
 VERBOSE=1 ./tests/test_types_decode.sh
