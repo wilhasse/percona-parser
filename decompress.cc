@@ -63,7 +63,7 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 // InnoDB headers needed for decompress, page size, etc.
 #include "data0type.h"
 #include "dict0dict.h"
-#include "dict0dd.h"
+// dict0dd.h excluded - pulls in inline code incompatible with standalone build
 #include "fil0fil.h"
 #include "fsp0fsp.h"
 #include "fsp0types.h"
@@ -89,6 +89,137 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 ulong srv_page_size       = 0;
 ulong srv_page_size_shift = 0;
 page_size_t univ_page_size(0, 0, false);
+
+// CFG export version - from row0quiesce.h (standalone definition to avoid dependencies)
+constexpr uint32_t IB_EXPORT_CFG_VERSION_V7 = 7;
+
+// From dict0dd.h - defined locally to avoid pulling in incompatible inline code
+enum dd_index_keys {
+  DD_INDEX_ID,
+  DD_INDEX_SPACE_ID,
+  DD_TABLE_ID,
+  DD_INDEX_ROOT,
+  DD_INDEX_TRX_ID,
+  DD_INDEX__LAST
+};
+static const char* const dd_index_key_strings[DD_INDEX__LAST] = {
+    "id", "space_id", "table_id", "root", "trx_id"};
+
+enum dd_column_keys {
+  DD_INSTANT_COLUMN_DEFAULT,
+  DD_INSTANT_COLUMN_DEFAULT_NULL,
+  DD_INSTANT_VERSION_ADDED,
+  DD_INSTANT_VERSION_DROPPED,
+  DD_INSTANT_PHYSICAL_POS,
+  DD_COLUMN__LAST
+};
+static const char* const dd_column_key_strings[DD_COLUMN__LAST] = {
+    "default", "default_null", "version_added", "version_dropped",
+    "physical_pos"};
+
+enum dd_space_keys {
+  DD_SPACE_FLAGS,
+  DD_SPACE_ID,
+  DD_SPACE_DISCARD,
+  DD_SPACE_SERVER_VERSION,
+  DD_SPACE_VERSION,
+  DD_SPACE_STATE,
+  DD_SPACE__LAST
+};
+static const char* const dd_space_key_strings[DD_SPACE__LAST] = {
+    "flags", "id", "discard", "server_version", "space_version", "state"};
+
+enum dd_table_keys {
+  DD_TABLE_AUTOINC,
+  DD_TABLE_DATA_DIRECTORY,
+  DD_TABLE_VERSION,
+  DD_TABLE_DISCARD,
+  DD_TABLE_INSTANT_COLS,
+  DD_TABLE__LAST
+};
+static const char* const dd_table_key_strings[DD_TABLE__LAST] = {
+    "autoinc", "data_directory", "version", "discard", "instant_col"};
+
+// From sql/dd/types/index_element.h
+namespace dd {
+class Index_element {
+ public:
+  enum enum_index_element_order { ORDER_UNDEF = 1, ORDER_ASC, ORDER_DESC };
+};
+}  // namespace dd
+
+// Simple base64 decoder to replace DD_instant_col_val_coder from dict0dd.h
+class DD_instant_col_val_coder {
+ public:
+  DD_instant_col_val_coder() : m_result(nullptr), m_result_len(0) {}
+  ~DD_instant_col_val_coder() { cleanup(); }
+
+  const byte* decode(const char* stream, size_t in_len, size_t* out_len) {
+    cleanup();
+    // Base64 decoding
+    static const int8_t b64_table[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    size_t decoded_len = (in_len * 3) / 4;
+    if (in_len > 0 && stream[in_len - 1] == '=') decoded_len--;
+    if (in_len > 1 && stream[in_len - 2] == '=') decoded_len--;
+
+    m_result = new byte[decoded_len + 1];
+    m_result_len = decoded_len;
+
+    size_t j = 0;
+    uint32_t accum = 0;
+    int bits = 0;
+    for (size_t i = 0; i < in_len && stream[i] != '='; i++) {
+      int8_t val = b64_table[(unsigned char)stream[i]];
+      if (val < 0) continue;
+      accum = (accum << 6) | val;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        if (j < decoded_len) m_result[j++] = (byte)(accum >> bits);
+      }
+    }
+    *out_len = j;
+    return m_result;
+  }
+
+ private:
+  void cleanup() {
+    delete[] m_result;
+    m_result = nullptr;
+    m_result_len = 0;
+  }
+  byte* m_result;
+  size_t m_result_len;
+};
+
+// Stubs for dtype functions from data0type.cc
+bool dtype_is_string_type(ulint mtype) {
+  if (mtype <= DATA_BLOB || mtype == DATA_MYSQL || mtype == DATA_VARMYSQL) {
+    return true;
+  }
+  return false;
+}
+
+ulint dtype_form_prtype(ulint old_prtype, ulint charset_coll) {
+  return (old_prtype + (charset_coll << 16));
+}
 
 // Provide minimal stubs for the ib::logger family, so vtables are satisfied.
 /** Error logging classes. */
@@ -1433,10 +1564,34 @@ static bool build_cfg_table_from_sdi(const SdiMetadata& meta,
     CfgColumn cfg_col;
     cfg_col.name = col.name;
     cfg_col.dd_type = col.type;
-    cfg_col.prtype = static_cast<uint32_t>(type_info.prtype);
-    cfg_col.mtype = static_cast<uint32_t>(type_info.mtype);
-    cfg_col.len = static_cast<uint32_t>(type_info.len);
-    cfg_col.mbminmaxlen = static_cast<uint32_t>(type_info.mbminmaxlen);
+
+    // System columns need special handling - they use mtype=DATA_SYS
+    // and prtype encodes the column identifier + DATA_NOT_NULL.
+    // Also update col_types so calc_fixed_len works correctly for indexes.
+    if (col.name == "DB_TRX_ID") {
+      cfg_col.prtype = DATA_TRX_ID | DATA_NOT_NULL;  // 1 | 256 = 257
+      cfg_col.mtype = DATA_SYS;
+      cfg_col.len = DATA_TRX_ID_LEN;
+      cfg_col.mbminmaxlen = 0;
+      col_types[i].mtype = DATA_SYS;
+      col_types[i].prtype = DATA_TRX_ID | DATA_NOT_NULL;
+      col_types[i].len = DATA_TRX_ID_LEN;
+      col_types[i].mbminmaxlen = 0;
+    } else if (col.name == "DB_ROLL_PTR") {
+      cfg_col.prtype = DATA_ROLL_PTR | DATA_NOT_NULL;  // 2 | 256 = 258
+      cfg_col.mtype = DATA_SYS;
+      cfg_col.len = DATA_ROLL_PTR_LEN;
+      cfg_col.mbminmaxlen = 0;
+      col_types[i].mtype = DATA_SYS;
+      col_types[i].prtype = DATA_ROLL_PTR | DATA_NOT_NULL;
+      col_types[i].len = DATA_ROLL_PTR_LEN;
+      col_types[i].mbminmaxlen = 0;
+    } else {
+      cfg_col.prtype = static_cast<uint32_t>(type_info.prtype);
+      cfg_col.mtype = static_cast<uint32_t>(type_info.mtype);
+      cfg_col.len = static_cast<uint32_t>(type_info.len);
+      cfg_col.mbminmaxlen = static_cast<uint32_t>(type_info.mbminmaxlen);
+    }
     cfg_col.char_length = col.char_length;
     cfg_col.numeric_scale = col.numeric_scale;
     cfg_col.collation_id = col.collation_id;
@@ -1465,6 +1620,46 @@ static bool build_cfg_table_from_sdi(const SdiMetadata& meta,
 
     cfg.columns.push_back(std::move(cfg_col));
     opx_to_col_index[i] = static_cast<int>(cfg.columns.size()) - 1;
+  }
+
+  // MySQL 8.0.29+ includes DB_ROW_ID in n_cols even for tables with explicit PK.
+  // The SDI doesn't include it, but we need to add it for .cfg compatibility.
+  // Insert DB_ROW_ID before DB_TRX_ID.
+  {
+    size_t trx_id_pos = cfg.columns.size();
+    for (size_t i = 0; i < cfg.columns.size(); ++i) {
+      if (cfg.columns[i].name == "DB_TRX_ID") {
+        trx_id_pos = i;
+        break;
+      }
+    }
+
+    CfgColumn row_id_col;
+    row_id_col.name = "DB_ROW_ID";
+    row_id_col.dd_type = dd::enum_column_types::LONG;  // Placeholder type
+    row_id_col.prtype = DATA_ROW_ID | DATA_NOT_NULL;  // 0 | 256 = 256
+    row_id_col.mtype = DATA_SYS;
+    row_id_col.len = DATA_ROW_ID_LEN;
+    row_id_col.mbminmaxlen = 0;
+    row_id_col.char_length = 0;
+    row_id_col.numeric_scale = 0;
+    row_id_col.collation_id = 0;
+    row_id_col.is_nullable = false;
+    row_id_col.is_unsigned = false;
+    row_id_col.ind = static_cast<uint32_t>(trx_id_pos);
+    row_id_col.version_added = UINT8_UNDEFINED;
+    row_id_col.version_dropped = UINT8_UNDEFINED;
+    row_id_col.is_instant_dropped = false;
+    row_id_col.phy_pos = UINT32_UNDEFINED;
+    row_id_col.has_instant_default = false;
+    row_id_col.instant_default_null = false;
+
+    cfg.columns.insert(cfg.columns.begin() + trx_id_pos, std::move(row_id_col));
+
+    // Update indices for columns after DB_ROW_ID
+    for (size_t i = trx_id_pos + 1; i < cfg.columns.size(); ++i) {
+      cfg.columns[i].ind = static_cast<uint32_t>(i);
+    }
   }
 
   uint32_t space_id_val = static_cast<uint32_t>(space_id);

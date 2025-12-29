@@ -46,7 +46,7 @@ wait_for_mysql() {
 }
 
 echo "==========================================="
-echo "Testing cfg generation for instant columns"
+echo "Testing .cfg generation for IMPORT TABLESPACE"
 echo "==========================================="
 
 if [ ! -f "$IB_PARSER" ]; then
@@ -72,9 +72,10 @@ INSERT INTO $TABLE_NAME (name, qty) VALUES
   ('beta', 20),
   ('gamma', 30);
 
+-- ALGORITHM=INSTANT not supported on COMPRESSED tables, use INPLACE
 ALTER TABLE $TABLE_NAME
   ADD COLUMN note VARCHAR(40) NOT NULL DEFAULT 'n/a',
-  ALGORITHM=INSTANT;
+  ALGORITHM=INPLACE;
 
 INSERT INTO $TABLE_NAME (name, qty, note) VALUES
   ('delta', 40, 'new row'),
@@ -106,16 +107,14 @@ echo "==> Preparing target table for import"
 log_verbose "DROP TABLE IF EXISTS $TABLE_NAME"
 "${MYSQL[@]}" "$DB_NAME" -e "DROP TABLE IF EXISTS $TABLE_NAME;"
 
+# Create target table with matching schema (DYNAMIC for rebuilt 16KB pages)
 "${MYSQL[@]}" "$DB_NAME" <<SQL
 CREATE TABLE $TABLE_NAME (
   id INT PRIMARY KEY AUTO_INCREMENT,
   name VARCHAR(50),
-  qty INT
+  qty INT,
+  note VARCHAR(40) NOT NULL DEFAULT 'n/a'
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
-
-ALTER TABLE $TABLE_NAME
-  ADD COLUMN note VARCHAR(40) NOT NULL DEFAULT 'n/a',
-  ALGORITHM=INSTANT;
 SQL
 
 log_verbose "ALTER TABLE $TABLE_NAME DISCARD TABLESPACE"
@@ -148,4 +147,4 @@ if [ "$ACTUAL_ROWS" != "$EXPECTED_ROWS" ]; then
   exit 1
 fi
 
-echo "OK: cfg import succeeded with instant columns."
+echo "OK: .cfg generation and IMPORT TABLESPACE succeeded."
