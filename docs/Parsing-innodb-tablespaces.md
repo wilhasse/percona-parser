@@ -103,6 +103,15 @@ Optional: provide an explicit index-id mapping file (one `old=new` per line):
   --cfg-out=rebuilt.cfg
 ```
 
+Dry-run validation (no rebuild) to compare SDI index ids/roots before import:
+
+```bash
+./build/ib_parser 5 source.ibd rebuilt.ibd \
+  --sdi-json=source_sdi.json \
+  --target-sdi-json=target_sdi.json \
+  --validate-remap
+```
+
 If the target SDI root page differs, `ib_parser` will warn. By default the
 source SDI root page is used. To force the target root page (when known), pass:
 

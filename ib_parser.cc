@@ -304,7 +304,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
               << "    [--target-sdi-json=PATH] [--index-id-map=PATH]\n"
               << "    [--target-sdi-root=N] [--use-target-sdi-root|--use-source-sdi-root]\n"
               << "    [--target-space-id=N] [--use-target-space-id|--use-source-space-id]\n"
-              << "    [--target-ibd=PATH] [--cfg-out=PATH]\n";
+              << "    [--target-ibd=PATH] [--cfg-out=PATH] [--validate-remap]\n";
     return 1;
   }
 
@@ -327,6 +327,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
   bool use_source_space_id = false;
   bool target_space_id_override_set = false;
   uint32_t target_space_id_override = 0;
+  bool validate_remap = false;
 
   for (int i = 3; i < argc; ++i) {
     const char* arg = argv[i];
@@ -414,6 +415,10 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
       use_source_space_id = true;
       continue;
     }
+    if (strcmp(arg, "--validate-remap") == 0) {
+      validate_remap = true;
+      continue;
+    }
     if (strncmp(arg, "--index-id-map=", 15) == 0) {
       index_id_map = arg + 15;
       continue;
@@ -452,6 +457,17 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
       (target_sdi_json == nullptr && source_sdi_json == nullptr)) {
     std::cerr << "Error: --cfg-out requires --sdi-json or --target-sdi-json.\n";
     return 1;
+  }
+
+  if (validate_remap) {
+    if (source_sdi_json == nullptr || target_sdi_json == nullptr) {
+      std::cerr << "Error: --validate-remap requires --sdi-json and --target-sdi-json.\n";
+      return 1;
+    }
+    const bool ok = validate_index_id_remap(source_sdi_json,
+                                            target_sdi_json,
+                                            index_id_map);
+    return ok ? 0 : 1;
   }
 
   File in_fd = my_open(in_file, O_RDONLY, MYF(0));

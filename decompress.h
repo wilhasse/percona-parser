@@ -31,6 +31,15 @@ extern bool decompress_page_inplace(
 bool decompress_ibd(File in_fd, File out_fd);
 
 /**
+ * validate_index_id_remap():
+ *   Dry-run SDI comparison for index-id remap. Prints per-index diffs and
+ *   returns false on missing/ambiguous mappings.
+ */
+bool validate_index_id_remap(const char* source_sdi_json_path,
+                             const char* target_sdi_json_path,
+                             const char* index_id_map_path);
+
+/**
  * rebuild_uncompressed_ibd():
  *   Experimental converter: reads a compressed tablespace (physical < logical),
  *   expands all pages to logical size, clears ZIP_SSIZE in FSP flags, updates

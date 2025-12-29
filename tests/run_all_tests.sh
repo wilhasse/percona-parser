@@ -321,6 +321,15 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
+# Test 14: Validate remap (SDI diff output)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "VALIDATE_REMAP" "$SCRIPT_DIR/test_validate_remap.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+[ "$JSON_OUTPUT" != "true" ] && echo ""
+
 SUITE_END_TIME=$(date +%s)
 SUITE_DURATION=$((SUITE_END_TIME - SUITE_START_TIME))
 

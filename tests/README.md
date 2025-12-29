@@ -20,6 +20,7 @@ This directory contains test scripts for validating the ib_parser tool's functio
 | `test_sdi_external.sh` | ✅ **Working** | Rebuild with external SDI BLOB pages | MySQL 8.0+ + ibd2sdi |
 | `test_cfg_import.sh` | ✅ **Working** | Generate .cfg from SDI for instant-column import | MySQL 8.0+ + ibd2sdi |
 | `test_index_id_remap.sh` | ✅ **Working** | Remap index IDs for import into a different table | MySQL 8.0+ + ibd2sdi |
+| `test_validate_remap.sh` | ✅ **Working** | Validate SDI remap diff output for index ids/roots | MySQL 8.0+ + ibd2sdi |
 | `run_all_tests.sh` | ✅ **Working** | Runs all test scripts sequentially | All of the above |
 
 ### Status Legend:

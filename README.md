@@ -41,6 +41,8 @@ Decompress or rebuild:
 ./build/ib_parser 5 source.ibd rebuilt.ibd --sdi-json=source_sdi.json \\
   --target-sdi-json=target_sdi.json --use-target-sdi-root \\
   --use-target-space-id --cfg-out=target.cfg
+./build/ib_parser 5 source.ibd rebuilt.ibd --sdi-json=source_sdi.json \\
+  --target-sdi-json=target_sdi.json --validate-remap
 ```
 
 ## Limitations

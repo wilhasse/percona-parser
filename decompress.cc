@@ -863,6 +863,118 @@ static bool extract_index_ids_by_name(
   return true;
 }
 
+struct IndexMeta {
+  std::string name;
+  uint64_t id{0};
+  uint32_t root{0};
+  uint32_t space_id{0};
+  bool has_id{false};
+  bool has_root{false};
+  bool has_space{false};
+};
+
+static void fill_index_meta(const SdiIndexInfo& idx, IndexMeta* meta) {
+  if (meta == nullptr) {
+    return;
+  }
+  *meta = IndexMeta();
+  meta->name = idx.name;
+
+  const auto kv = parse_kv_string(idx.se_private_data);
+  auto id_it = kv.find(dd_index_key_strings[DD_INDEX_ID]);
+  if (id_it != kv.end()) {
+    uint64_t id = 0;
+    if (parse_uint64_value(id_it->second, &id)) {
+      meta->id = id;
+      meta->has_id = true;
+    }
+  }
+
+  auto root_it = kv.find(dd_index_key_strings[DD_INDEX_ROOT]);
+  if (root_it != kv.end()) {
+    uint32_t root = 0;
+    if (parse_uint32_value(root_it->second, &root)) {
+      meta->root = root;
+      meta->has_root = true;
+    }
+  }
+
+  auto space_it = kv.find(dd_index_key_strings[DD_INDEX_SPACE_ID]);
+  if (space_it != kv.end()) {
+    uint32_t space_id = 0;
+    if (parse_uint32_value(space_it->second, &space_id)) {
+      meta->space_id = space_id;
+      meta->has_space = true;
+    }
+  }
+}
+
+static bool extract_index_meta_by_name(
+    const SdiMetadata& meta,
+    std::unordered_map<std::string, IndexMeta>* out,
+    std::vector<std::string>* order,
+    std::string* err) {
+  if (out == nullptr) {
+    if (err) {
+      *err = "index metadata output is null";
+    }
+    return false;
+  }
+  out->clear();
+  if (order != nullptr) {
+    order->clear();
+  }
+
+  if (!meta.has_table) {
+    if (err) {
+      *err = "SDI metadata missing table object";
+    }
+    return false;
+  }
+
+  for (const auto& idx : meta.table.indexes) {
+    if (idx.name.empty()) {
+      continue;
+    }
+    const std::string key = to_lower_copy(idx.name);
+    if (out->find(key) != out->end()) {
+      if (err) {
+        *err = "duplicate index name in SDI: " + idx.name;
+      }
+      return false;
+    }
+
+    IndexMeta meta_row;
+    fill_index_meta(idx, &meta_row);
+    (*out)[key] = meta_row;
+    if (order != nullptr) {
+      order->push_back(key);
+    }
+  }
+
+  if (out->empty()) {
+    if (err) {
+      *err = "no indexes found in SDI metadata";
+    }
+    return false;
+  }
+  return true;
+}
+
+static std::string format_u64(bool has_value, uint64_t value) {
+  if (!has_value) {
+    return "?";
+  }
+  return std::to_string(value);
+}
+
+static std::string format_u32(bool has_value, uint32_t value) {
+  if (!has_value) {
+    return "?";
+  }
+  return std::to_string(value);
+}
+
 static bool build_index_id_remap_from_sdi(
     const SdiMetadata& source,
     const SdiMetadata& target,
@@ -1184,6 +1296,163 @@ static bool load_sdi_metadata(const char* json_path, SdiMetadata* meta) {
     fprintf(stderr, "Warning: SDI JSON missing Tablespace object\n");
   }
 
+  return true;
+}
+
+bool validate_index_id_remap(const char* source_sdi_json_path,
+                             const char* target_sdi_json_path,
+                             const char* index_id_map_path) {
+  if (source_sdi_json_path == nullptr || target_sdi_json_path == nullptr) {
+    fprintf(stderr,
+            "Error: --validate-remap requires --sdi-json and --target-sdi-json.\n");
+    return false;
+  }
+
+  SdiMetadata source_meta;
+  SdiMetadata target_meta;
+  if (!load_sdi_metadata(source_sdi_json_path, &source_meta)) {
+    return false;
+  }
+  if (!load_sdi_metadata(target_sdi_json_path, &target_meta)) {
+    return false;
+  }
+
+  std::unordered_map<std::string, IndexMeta> src_by_name;
+  std::unordered_map<std::string, IndexMeta> tgt_by_name;
+  std::vector<std::string> src_order;
+  std::string err;
+  if (!extract_index_meta_by_name(source_meta, &src_by_name, &src_order, &err)) {
+    fprintf(stderr, "Error: source SDI %s\n", err.c_str());
+    return false;
+  }
+  if (!extract_index_meta_by_name(target_meta, &tgt_by_name, nullptr, &err)) {
+    fprintf(stderr, "Error: target SDI %s\n", err.c_str());
+    return false;
+  }
+
+  std::unordered_map<uint64_t, std::string> src_id_to_name;
+  std::unordered_map<uint64_t, std::string> tgt_id_to_name;
+  for (const auto& entry : src_by_name) {
+    if (entry.second.has_id) {
+      src_id_to_name[entry.second.id] = entry.second.name;
+    }
+  }
+  for (const auto& entry : tgt_by_name) {
+    if (entry.second.has_id) {
+      tgt_id_to_name[entry.second.id] = entry.second.name;
+    }
+  }
+
+  bool ok = true;
+  size_t missing_indexes = 0;
+  size_t ambiguous = 0;
+  size_t matched = 0;
+  std::unordered_map<uint64_t, std::string> target_id_owner;
+
+  fprintf(stderr, "\nIndex remap validation (source -> target):\n");
+
+  for (const auto& key : src_order) {
+    const auto& src = src_by_name[key];
+    auto it = tgt_by_name.find(key);
+    if (it == tgt_by_name.end()) {
+      fprintf(stderr, "  %s: missing in target SDI\n", src.name.c_str());
+      missing_indexes++;
+      ok = false;
+      continue;
+    }
+
+    const auto& tgt = it->second;
+    if (!src.has_id || !tgt.has_id) {
+      fprintf(stderr, "  %s: missing index id (source=%s target=%s)\n",
+              src.name.c_str(),
+              src.has_id ? "ok" : "missing",
+              tgt.has_id ? "ok" : "missing");
+      ok = false;
+    }
+
+    if (src.has_id && tgt.has_id) {
+      auto owner = target_id_owner.find(tgt.id);
+      if (owner != target_id_owner.end() && owner->second != src.name) {
+        fprintf(stderr,
+                "  %s: target id %llu already mapped to %s (ambiguous)\n",
+                src.name.c_str(),
+                static_cast<unsigned long long>(tgt.id),
+                owner->second.c_str());
+        ambiguous++;
+        ok = false;
+      } else {
+        target_id_owner[tgt.id] = src.name;
+      }
+    }
+
+    fprintf(stderr,
+            "  %s: id %s -> %s, root %s -> %s, space %s -> %s\n",
+            src.name.c_str(),
+            format_u64(src.has_id, src.id).c_str(),
+            format_u64(tgt.has_id, tgt.id).c_str(),
+            format_u32(src.has_root, src.root).c_str(),
+            format_u32(tgt.has_root, tgt.root).c_str(),
+            format_u32(src.has_space, src.space_id).c_str(),
+            format_u32(tgt.has_space, tgt.space_id).c_str());
+    matched++;
+  }
+
+  if (index_id_map_path != nullptr) {
+    std::unordered_map<uint64_t, uint64_t> file_map;
+    if (!load_index_id_map_file(index_id_map_path, &file_map, &err)) {
+      fprintf(stderr, "Error: %s\n", err.c_str());
+      return false;
+    }
+    fprintf(stderr, "Index-id map file: %s (%zu entries)\n",
+            index_id_map_path, file_map.size());
+    std::unordered_map<uint64_t, uint64_t> target_seen;
+    for (const auto& entry : file_map) {
+      const uint64_t src_id = entry.first;
+      const uint64_t tgt_id = entry.second;
+      const auto src_name_it = src_id_to_name.find(src_id);
+      const auto tgt_name_it = tgt_id_to_name.find(tgt_id);
+
+      if (src_name_it == src_id_to_name.end()) {
+        fprintf(stderr,
+                "  Error: map source id %llu not found in source SDI\n",
+                static_cast<unsigned long long>(src_id));
+        ok = false;
+      }
+      if (tgt_name_it == tgt_id_to_name.end()) {
+        fprintf(stderr,
+                "  Error: map target id %llu not found in target SDI\n",
+                static_cast<unsigned long long>(tgt_id));
+        ok = false;
+      }
+
+      auto seen = target_seen.find(tgt_id);
+      if (seen != target_seen.end() && seen->second != src_id) {
+        fprintf(stderr,
+                "  Error: map target id %llu mapped from multiple sources\n",
+                static_cast<unsigned long long>(tgt_id));
+        ok = false;
+      } else {
+        target_seen[tgt_id] = src_id;
+      }
+
+      const std::string src_name =
+          (src_name_it == src_id_to_name.end()) ? "?" : src_name_it->second;
+      const std::string tgt_name =
+          (tgt_name_it == tgt_id_to_name.end()) ? "?" : tgt_name_it->second;
+      fprintf(stderr, "  Map: %llu (%s) -> %llu (%s)\n",
+              static_cast<unsigned long long>(src_id), src_name.c_str(),
+              static_cast<unsigned long long>(tgt_id), tgt_name.c_str());
+    }
+  }
+
+  if (!ok) {
+    fprintf(stderr,
+            "Validation failed: %zu missing, %zu ambiguous mappings\n",
+            missing_indexes, ambiguous);
+    return false;
+  }
+
+  fprintf(stderr, "Validation OK: %zu indexes matched\n", matched);
   return true;
 }
 
