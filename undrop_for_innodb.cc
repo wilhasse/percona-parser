@@ -319,12 +319,12 @@ static bool format_innodb_date(const unsigned char* ptr, ulint len, std::string&
   if (!ptr || len < 3) {
     return false;
   }
-  uint32_t raw = uint3korr(ptr);
+  uint32_t raw = static_cast<uint32_t>(read_be_int_signed(ptr, len));
   MYSQL_TIME tm{};
   tm.time_type = MYSQL_TIMESTAMP_DATE;
-  tm.year = static_cast<unsigned int>(raw / (16 * 32));
-  tm.month = static_cast<unsigned int>((raw / 32) % 16);
-  tm.day = static_cast<unsigned int>(raw % 32);
+  tm.day = static_cast<unsigned int>(raw & 31);
+  tm.month = static_cast<unsigned int>((raw >> 5) & 15);
+  tm.year = static_cast<unsigned int>(raw >> 9);
   char buf[MAX_DATE_STRING_REP_LENGTH];
   int n = my_date_to_str(tm, buf);
   out.assign(buf, static_cast<size_t>(n));

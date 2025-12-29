@@ -119,6 +119,65 @@ static inline uint64_t read_uint64_from_page(const unsigned char* ptr) {
   return mach_read_from_8(ptr);
 }
 
+static int base64_value(unsigned char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+static bool decode_base64(const std::string& input, std::string& output) {
+  if (input.empty() || (input.size() % 4) != 0) {
+    return false;
+  }
+  output.clear();
+  output.reserve(input.size() / 4 * 3);
+  for (size_t i = 0; i < input.size(); i += 4) {
+    int v0 = base64_value(static_cast<unsigned char>(input[i]));
+    int v1 = base64_value(static_cast<unsigned char>(input[i + 1]));
+    if (v0 < 0 || v1 < 0) {
+      return false;
+    }
+
+    char c2 = input[i + 2];
+    char c3 = input[i + 3];
+    int v2 = (c2 == '=') ? -2 : base64_value(static_cast<unsigned char>(c2));
+    int v3 = (c3 == '=') ? -2 : base64_value(static_cast<unsigned char>(c3));
+    if ((v2 < 0 && v2 != -2) || (v3 < 0 && v3 != -2)) {
+      return false;
+    }
+
+    unsigned char b0 = static_cast<unsigned char>((v0 << 2) | (v1 >> 4));
+    output.push_back(static_cast<char>(b0));
+
+    if (v2 == -2) {
+      if (v3 != -2) {
+        return false;
+      }
+      break;
+    }
+    unsigned char b1 = static_cast<unsigned char>(((v1 & 0x0F) << 4) | (v2 >> 2));
+    output.push_back(static_cast<char>(b1));
+
+    if (v3 == -2) {
+      break;
+    }
+    unsigned char b2 = static_cast<unsigned char>(((v2 & 0x03) << 6) | v3);
+    output.push_back(static_cast<char>(b2));
+  }
+  return true;
+}
+
+static std::string decode_sdi_string(const std::string& input) {
+  std::string decoded;
+  if (decode_base64(input, decoded)) {
+    return decoded;
+  }
+  return input;
+}
+
 bool parser_debug_enabled() {
   static int cached = -1;
   if (cached != -1) {
@@ -1170,9 +1229,9 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
             for (rapidjson::SizeType ei = 0; ei < elems.Size(); ++ei) {
                 const auto& el = elems[ei];
                 if (el.IsString()) {
-                    def.elements[ei] = el.GetString();
+                    def.elements[ei] = decode_sdi_string(el.GetString());
                 } else if (el.IsObject() && el.HasMember("name") && el["name"].IsString()) {
-                    def.elements[ei] = el["name"].GetString();
+                    def.elements[ei] = decode_sdi_string(el["name"].GetString());
                 } else {
                     def.elements_complete = false;
                 }
