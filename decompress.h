@@ -40,6 +40,8 @@ bool decompress_ibd(File in_fd, File out_fd);
  *   If index_id_map_path is provided, it is merged into the remap table.
  *   If target_sdi_root_override is provided, compare with source SDI root and warn.
  *   use_target_sdi_root/use_source_sdi_root control which root page is used.
+ *   If target_space_id_override is provided, compare with source space_id and warn.
+ *   use_target_space_id/use_source_space_id control which space_id is written.
  *   If cfg_out_path is provided, writes a .cfg file from SDI metadata.
  */
 bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
@@ -51,7 +53,11 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
                               bool use_source_sdi_root,
                               bool target_sdi_root_override_set,
                               uint32_t target_sdi_root_override,
-                              const char* target_ibd_path);
+                              const char* target_ibd_path,
+                              bool use_target_space_id,
+                              bool use_source_space_id,
+                              bool target_space_id_override_set,
+                              uint32_t target_space_id_override);
 
 bool determine_page_size(File file_in, page_size_t &page_sz);
 

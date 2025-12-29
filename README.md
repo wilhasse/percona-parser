@@ -39,7 +39,8 @@ Decompress or rebuild:
 ./build/ib_parser 5 source.ibd rebuilt.ibd --sdi-json=source_sdi.json \\
   --target-sdi-json=target_sdi.json --index-id-map=index_id.map --cfg-out=target.cfg
 ./build/ib_parser 5 source.ibd rebuilt.ibd --sdi-json=source_sdi.json \\
-  --target-sdi-json=target_sdi.json --use-target-sdi-root --cfg-out=target.cfg
+  --target-sdi-json=target_sdi.json --use-target-sdi-root \\
+  --use-target-space-id --cfg-out=target.cfg
 ```
 
 ## Limitations
@@ -51,7 +52,8 @@ Decompress or rebuild:
 - .cfg generation requires SDI JSON; import without .cfg may fail on instant tables.
 - Importing into a different table requires index-id remap via `--target-sdi-json`.
 - SDI root mismatches emit warnings; use `--use-target-sdi-root` or `--target-sdi-root`.
-- If the target tablespace is not readable, provide `--target-ibd` for SDI root lookup.
+- space_id mismatches emit warnings; use `--use-target-space-id` or `--target-space-id`.
+- If the target tablespace is not readable, provide `--target-ibd` for SDI root/space_id lookup.
 
 ## Docs and Tests
 

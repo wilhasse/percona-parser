@@ -689,6 +689,86 @@ static bool parse_uint32_value(const std::string& s, uint32_t* out) {
   return true;
 }
 
+struct TablespaceHeaderInfo {
+  bool has_sdi{false};
+  uint32_t sdi_version{0};
+  page_no_t sdi_root{FIL_NULL};
+  space_id_t space_id{SPACE_UNKNOWN};
+};
+
+static bool read_tablespace_header(const std::string& path,
+                                   TablespaceHeaderInfo* out,
+                                   std::string* err) {
+  if (out == nullptr) {
+    if (err != nullptr) {
+      *err = "invalid output pointer";
+    }
+    return false;
+  }
+  *out = TablespaceHeaderInfo();
+
+  File fd = my_open(path.c_str(), O_RDONLY, MYF(0));
+  if (fd < 0) {
+    if (err != nullptr) {
+      *err = "cannot open tablespace file";
+    }
+    return false;
+  }
+
+  page_size_t pg_sz(0, 0, false);
+  if (!determine_page_size(fd, pg_sz)) {
+    my_close(fd, MYF(0));
+    if (err != nullptr) {
+      *err = "could not determine tablespace page size";
+    }
+    return false;
+  }
+
+  const size_t physical_size = pg_sz.physical();
+  std::vector<byte> buf(physical_size);
+  if (my_seek(fd, 0, MY_SEEK_SET, MYF(0)) == MY_FILEPOS_ERROR) {
+    my_close(fd, MYF(0));
+    if (err != nullptr) {
+      *err = "seek failed";
+    }
+    return false;
+  }
+  size_t r = my_read(fd, buf.data(), physical_size, MYF(0));
+  my_close(fd, MYF(0));
+  if (r != physical_size) {
+    if (err != nullptr) {
+      *err = "failed to read page 0";
+    }
+    return false;
+  }
+
+  const uint32_t flags = fsp_header_get_flags(buf.data());
+  if (!fsp_flags_is_valid(flags)) {
+    if (err != nullptr) {
+      *err = "invalid FSP flags";
+    }
+    return false;
+  }
+
+  out->space_id = fsp_header_get_field(buf.data(), FSP_SPACE_ID);
+  if (out->space_id == 0 || out->space_id == SPACE_UNKNOWN) {
+    if (err != nullptr) {
+      *err = "invalid space_id in tablespace header";
+    }
+    return false;
+  }
+
+  if (FSP_FLAGS_HAS_SDI(flags)) {
+    out->has_sdi = true;
+    const page_size_t page_size(flags);
+    const ulint sdi_offset = fsp_header_get_sdi_offset(page_size);
+    out->sdi_version = mach_read_from_4(buf.data() + sdi_offset);
+    out->sdi_root = mach_read_from_4(buf.data() + sdi_offset + 4);
+  }
+
+  return true;
+}
+
 static bool file_exists(const std::string& path) {
   struct stat st;
   return !path.empty() && stat(path.c_str(), &st) == 0;
@@ -730,73 +810,6 @@ static bool resolve_tablespace_path(const std::string& path,
   }
 
   return false;
-}
-
-static bool read_sdi_root_from_tablespace(const std::string& path,
-                                          page_no_t* root_page,
-                                          uint32_t* version,
-                                          std::string* err) {
-  if (root_page == nullptr || version == nullptr) {
-    if (err) {
-      *err = "invalid output pointers";
-    }
-    return false;
-  }
-
-  File fd = my_open(path.c_str(), O_RDONLY, MYF(0));
-  if (fd < 0) {
-    if (err) {
-      *err = "cannot open target tablespace file";
-    }
-    return false;
-  }
-
-  page_size_t pg_sz(0, 0, false);
-  if (!determine_page_size(fd, pg_sz)) {
-    my_close(fd, MYF(0));
-    if (err) {
-      *err = "could not determine target page size";
-    }
-    return false;
-  }
-
-  const size_t physical_size = pg_sz.physical();
-  std::vector<byte> buf(physical_size);
-  if (my_seek(fd, 0, MY_SEEK_SET, MYF(0)) == MY_FILEPOS_ERROR) {
-    my_close(fd, MYF(0));
-    if (err) {
-      *err = "seek failed";
-    }
-    return false;
-  }
-  size_t r = my_read(fd, buf.data(), physical_size, MYF(0));
-  my_close(fd, MYF(0));
-  if (r != physical_size) {
-    if (err) {
-      *err = "failed to read page 0";
-    }
-    return false;
-  }
-
-  const uint32_t flags = fsp_header_get_flags(buf.data());
-  if (!fsp_flags_is_valid(flags)) {
-    if (err) {
-      *err = "invalid FSP flags";
-    }
-    return false;
-  }
-  if (!FSP_FLAGS_HAS_SDI(flags)) {
-    if (err) {
-      *err = "tablespace has no SDI flag";
-    }
-    return false;
-  }
-
-  const page_size_t page_size(flags);
-  const ulint sdi_offset = fsp_header_get_sdi_offset(page_size);
-  *version = mach_read_from_4(buf.data() + sdi_offset);
-  *root_page = mach_read_from_4(buf.data() + sdi_offset + 4);
-  return true;
 }
 
 static std::string to_lower_copy(const std::string& input) {
@@ -1171,6 +1184,26 @@ static bool load_sdi_metadata(const char* json_path, SdiMetadata* meta) {
     fprintf(stderr, "Warning: SDI JSON missing Tablespace object\n");
   }
 
+  return true;
+}
+
+static bool extract_space_id_from_meta(const SdiMetadata& meta,
+                                       space_id_t* out) {
+  if (out == nullptr || !meta.has_tablespace) {
+    return false;
+  }
+
+  const auto space_kv = parse_kv_string(meta.tablespace.se_private_data);
+  auto space_id_it = space_kv.find(dd_space_key_strings[DD_SPACE_ID]);
+  uint32_t space_id_val = 0;
+  if (space_id_it == space_kv.end() ||
+      !parse_uint32_value(space_id_it->second, &space_id_val)) {
+    return false;
+  }
+  if (space_id_val == 0 || space_id_val == SPACE_UNKNOWN) {
+    return false;
+  }
+  *out = static_cast<space_id_t>(space_id_val);
   return true;
 }
 
@@ -1742,6 +1775,7 @@ static bool build_cfg_table_from_sdi(const SdiMetadata& meta,
                                      uint32_t space_flags,
                                      page_no_t sdi_root_page,
                                      space_id_t space_id,
+                                     bool force_space_id,
                                      CfgTable* out) {
   if (out == nullptr) {
     return false;
@@ -1991,9 +2025,11 @@ static bool build_cfg_table_from_sdi(const SdiMetadata& meta,
   }
 
   uint32_t space_id_val = static_cast<uint32_t>(space_id);
-  auto space_id_it = space_kv.find(dd_space_key_strings[DD_SPACE_ID]);
-  if (space_id_it != space_kv.end()) {
-    parse_uint32_value(space_id_it->second, &space_id_val);
+  if (!force_space_id) {
+    auto space_id_it = space_kv.find(dd_space_key_strings[DD_SPACE_ID]);
+    if (space_id_it != space_kv.end()) {
+      parse_uint32_value(space_id_it->second, &space_id_val);
+    }
   }
 
   // Compute column counters for instant metadata
@@ -3209,7 +3245,11 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
                               bool use_source_sdi_root,
                               bool target_sdi_root_override_set,
                               uint32_t target_sdi_root_override,
-                              const char* target_ibd_path)
+                              const char* target_ibd_path,
+                              bool use_target_space_id,
+                              bool use_source_space_id,
+                              bool target_space_id_override_set,
+                              uint32_t target_space_id_override)
 {
   MY_STAT stat_info;
   if (my_fstat(in_fd, &stat_info) != 0) {
@@ -3265,8 +3305,10 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
   page_no_t source_sdi_root_page = FIL_NULL;
   page_no_t target_sdi_root_page = FIL_NULL;
   bool target_sdi_root_set = false;
-  uint32_t target_sdi_root_version = 0;
   bool sdi_root_set = false;
+  space_id_t source_space_id = SPACE_UNKNOWN;
+  space_id_t target_space_id = SPACE_UNKNOWN;
+  bool target_space_id_set = false;
   uint32_t space_flags = 0;
   bool space_flags_set = false;
   SdiMetadata sdi_meta;
@@ -3335,53 +3377,94 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
     }
   }
 
-  if (target_sdi_root_override_set) {
-    target_sdi_root_page = static_cast<page_no_t>(target_sdi_root_override);
-    target_sdi_root_set = true;
-  } else if (target_ibd_path != nullptr) {
+  TablespaceHeaderInfo target_header;
+  bool target_header_loaded = false;
+
+  auto load_target_header = [&](const std::string& path) {
     std::string err;
-    if (read_sdi_root_from_tablespace(target_ibd_path, &target_sdi_root_page,
-                                      &target_sdi_root_version, &err)) {
-      target_sdi_root_set = true;
-      fprintf(stderr,
-              "Target SDI header: version=%u root_page=%u (file=%s)\n",
-              target_sdi_root_version,
-              static_cast<unsigned int>(target_sdi_root_page),
-              target_ibd_path);
+    if (read_tablespace_header(path, &target_header, &err)) {
+      target_header_loaded = true;
+      if (target_header.has_sdi) {
+        fprintf(stderr,
+                "Target tablespace header: space_id=%u sdi_version=%u root_page=%u (file=%s)\n",
+                static_cast<unsigned int>(target_header.space_id),
+                target_header.sdi_version,
+                static_cast<unsigned int>(target_header.sdi_root),
+                path.c_str());
+      } else {
+        fprintf(stderr,
+                "Target tablespace header: space_id=%u (file=%s)\n",
+                static_cast<unsigned int>(target_header.space_id),
+                path.c_str());
+      }
     } else {
       fprintf(stderr,
-              "Warning: unable to read target SDI root from %s: %s\n",
-              target_ibd_path, err.c_str());
+              "Warning: unable to read target tablespace header from %s: %s\n",
+              path.c_str(), err.c_str());
     }
+  };
+
+  if (target_ibd_path != nullptr) {
+    load_target_header(target_ibd_path);
   } else if (have_target_meta && !target_meta.tablespace.files.empty()) {
     const std::string& raw_path = target_meta.tablespace.files.front();
     std::string resolved;
     if (resolve_tablespace_path(raw_path, &resolved)) {
-      std::string err;
-      if (read_sdi_root_from_tablespace(resolved, &target_sdi_root_page,
-                                        &target_sdi_root_version, &err)) {
-        target_sdi_root_set = true;
-        fprintf(stderr,
-                "Target SDI header: version=%u root_page=%u (file=%s)\n",
-                target_sdi_root_version,
-                static_cast<unsigned int>(target_sdi_root_page),
-                resolved.c_str());
-      } else {
-        fprintf(stderr,
-                "Warning: unable to read target SDI root from %s: %s\n",
-                resolved.c_str(), err.c_str());
-      }
+      load_target_header(resolved);
     } else {
       fprintf(stderr,
-              "Warning: target SDI root lookup skipped (cannot resolve '%s').\n"
-              "         Set MYSQL_DATADIR, use --target-ibd, or pass --target-sdi-root.\n",
+              "Warning: target tablespace header lookup skipped (cannot resolve '%s').\n"
+              "         Set MYSQL_DATADIR, use --target-ibd, or pass --target-space-id.\n",
               raw_path.c_str());
     }
+  }
+
+  if (target_sdi_root_override_set) {
+    target_sdi_root_page = static_cast<page_no_t>(target_sdi_root_override);
+    target_sdi_root_set = true;
+  } else if (target_header_loaded && target_header.has_sdi) {
+    target_sdi_root_page = target_header.sdi_root;
+    target_sdi_root_set = true;
+  }
+
+  if (target_space_id_override_set) {
+    if (target_space_id_override == 0 ||
+        target_space_id_override == SPACE_UNKNOWN) {
+      fprintf(stderr, "Error: invalid --target-space-id value (%u).\n",
+              target_space_id_override);
+      return false;
+    }
+    target_space_id = static_cast<space_id_t>(target_space_id_override);
+    target_space_id_set = true;
+  } else if (target_header_loaded) {
+    target_space_id = target_header.space_id;
+    target_space_id_set = true;
+  } else if (have_target_meta) {
+    target_space_id_set = extract_space_id_from_meta(target_meta,
+                                                     &target_space_id);
+  }
+
+  if (target_header_loaded && target_space_id_set &&
+      target_header.space_id != target_space_id) {
+    fprintf(stderr,
+            "Warning: target space_id differs from tablespace header (%u vs %u).\n",
+            static_cast<unsigned int>(target_space_id),
+            static_cast<unsigned int>(target_header.space_id));
   }
 
   if (use_target_sdi_root && !target_sdi_root_set) {
     fprintf(stderr,
             "Error: --use-target-sdi-root requires target SDI root data.\n");
+    return false;
+  }
+  if (use_target_space_id && use_source_space_id) {
+    fprintf(stderr,
+            "Error: --use-target-space-id and --use-source-space-id are mutually exclusive.\n");
+    return false;
+  }
+  if (use_target_space_id && !target_space_id_set) {
+    fprintf(stderr,
+            "Error: --use-target-space-id requires target space_id data.\n");
     return false;
   }
 
@@ -3476,9 +3559,44 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
 
       if (!update_tablespace_header_for_uncompressed(out_buf.get(),
                                                      logical_size,
-                                                     &space_id)) {
+                                                     &source_space_id)) {
         return false;
       }
+      space_id = source_space_id;
+
+      if (target_space_id_set &&
+          (target_space_id == 0 || target_space_id == SPACE_UNKNOWN)) {
+        fprintf(stderr,
+                "Warning: target space_id is invalid (%u); ignoring.\n",
+                static_cast<unsigned int>(target_space_id));
+        target_space_id_set = false;
+      }
+
+      if (target_space_id_set && target_space_id != source_space_id) {
+        fprintf(stderr,
+                "Warning: space_id mismatch (source=%u target=%u).\n",
+                static_cast<unsigned int>(source_space_id),
+                static_cast<unsigned int>(target_space_id));
+        if (use_target_space_id) {
+          space_id = target_space_id;
+          fprintf(stderr,
+                  "         Using target space_id as requested.\n");
+        } else {
+          fprintf(stderr,
+                  "         Using source space_id (default).\n");
+        }
+      } else if (use_target_space_id && target_space_id_set) {
+        space_id = target_space_id;
+      }
+
+      if (use_source_space_id) {
+        space_id = source_space_id;
+      }
+
+      if (space_id != source_space_id) {
+        fsp_header_set_field(out_buf.get(), FSP_SPACE_ID, space_id);
+      }
+
       space_flags = fsp_header_get_flags(out_buf.get());
       space_flags_set = true;
 
@@ -3612,10 +3730,22 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
       return false;
     }
 
+    bool force_space_id_for_cfg = false;
+    space_id_t meta_space_id = SPACE_UNKNOWN;
+    if (extract_space_id_from_meta(sdi_meta, &meta_space_id) &&
+        meta_space_id != space_id) {
+      fprintf(stderr,
+              "Warning: SDI metadata space_id %u differs from output space_id %u; overriding .cfg.\n",
+              static_cast<unsigned int>(meta_space_id),
+              static_cast<unsigned int>(space_id));
+      force_space_id_for_cfg = true;
+    }
+
     CfgTable cfg_table;
     if (!build_cfg_table_from_sdi(sdi_meta, space_flags,
                                   sdi_root_set ? sdi_root_page : FIL_NULL,
-                                  space_id, &cfg_table)) {
+                                  space_id, force_space_id_for_cfg,
+                                  &cfg_table)) {
       fprintf(stderr, "Error: failed to build cfg metadata.\n");
       return false;
     }

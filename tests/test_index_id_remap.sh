@@ -188,6 +188,7 @@ echo "==> Rebuilding with index-id remap"
   --target-sdi-json="$TARGET_SDI" \
   --target-ibd="$TARGET_IBD" \
   --use-target-sdi-root \
+  --use-target-space-id \
   --cfg-out="$REBUILT_CFG"
 
 echo "==> Dropping source database to avoid tablespace ID conflict"

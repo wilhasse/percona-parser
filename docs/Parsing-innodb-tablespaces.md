@@ -113,10 +113,20 @@ source SDI root page is used. To force the target root page (when known), pass:
   --use-target-sdi-root
 ```
 
+If the target space_id differs, `ib_parser` will warn and keep the source
+space_id unless you opt in. To remap space_id, pass:
+
+```bash
+./build/ib_parser 5 source.ibd rebuilt.ibd \
+  --sdi-json=source_sdi.json \
+  --target-sdi-json=target_sdi.json \
+  --use-target-space-id
+```
+
 When target SDI JSON contains a relative tablespace path, set `MYSQL_DATADIR`
 or `IB_PARSER_DATADIR` so the tool can locate the target .ibd header for root
 comparison. You can also pass `--target-ibd=PATH` (pointing to a readable copy)
-or supply `--target-sdi-root=N` to override manually.
+or supply `--target-sdi-root=N` / `--target-space-id=N` to override manually.
 
 Import steps (example):
 

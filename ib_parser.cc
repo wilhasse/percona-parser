@@ -303,6 +303,7 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
               << "  ib_parser 5 <in_file> <out_file> [--sdi-json=PATH]\n"
               << "    [--target-sdi-json=PATH] [--index-id-map=PATH]\n"
               << "    [--target-sdi-root=N] [--use-target-sdi-root|--use-source-sdi-root]\n"
+              << "    [--target-space-id=N] [--use-target-space-id|--use-source-space-id]\n"
               << "    [--target-ibd=PATH] [--cfg-out=PATH]\n";
     return 1;
   }
@@ -322,6 +323,10 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
   bool use_source_sdi_root = false;
   bool target_sdi_root_override_set = false;
   uint32_t target_sdi_root_override = 0;
+  bool use_target_space_id = false;
+  bool use_source_space_id = false;
+  bool target_space_id_override_set = false;
+  uint32_t target_space_id_override = 0;
 
   for (int i = 3; i < argc; ++i) {
     const char* arg = argv[i];
@@ -370,12 +375,43 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
       target_sdi_root_override_set = true;
       continue;
     }
+    if (strncmp(arg, "--target-space-id=", 18) == 0) {
+      const char* value = arg + 18;
+      unsigned long long space_id = std::strtoull(value, nullptr, 10);
+      if (space_id == 0 || space_id > std::numeric_limits<uint32_t>::max() ||
+          space_id == SPACE_UNKNOWN) {
+        std::cerr << "Invalid --target-space-id value\n";
+        return 1;
+      }
+      target_space_id_override = static_cast<uint32_t>(space_id);
+      target_space_id_override_set = true;
+      continue;
+    }
+    if (strcmp(arg, "--target-space-id") == 0 && i + 1 < argc) {
+      unsigned long long space_id = std::strtoull(argv[++i], nullptr, 10);
+      if (space_id == 0 || space_id > std::numeric_limits<uint32_t>::max() ||
+          space_id == SPACE_UNKNOWN) {
+        std::cerr << "Invalid --target-space-id value\n";
+        return 1;
+      }
+      target_space_id_override = static_cast<uint32_t>(space_id);
+      target_space_id_override_set = true;
+      continue;
+    }
     if (strcmp(arg, "--use-target-sdi-root") == 0) {
       use_target_sdi_root = true;
       continue;
     }
     if (strcmp(arg, "--use-source-sdi-root") == 0) {
       use_source_sdi_root = true;
+      continue;
+    }
+    if (strcmp(arg, "--use-target-space-id") == 0) {
+      use_target_space_id = true;
+      continue;
+    }
+    if (strcmp(arg, "--use-source-space-id") == 0) {
+      use_source_space_id = true;
       continue;
     }
     if (strncmp(arg, "--index-id-map=", 15) == 0) {
@@ -407,6 +443,10 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
     std::cerr << "Error: --use-target-sdi-root and --use-source-sdi-root are mutually exclusive.\n";
     return 1;
   }
+  if (use_target_space_id && use_source_space_id) {
+    std::cerr << "Error: --use-target-space-id and --use-source-space-id are mutually exclusive.\n";
+    return 1;
+  }
 
   if (cfg_out != nullptr &&
       (target_sdi_json == nullptr && source_sdi_json == nullptr)) {
@@ -430,7 +470,10 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
                                      target_sdi_json, index_id_map, cfg_out,
                                      use_target_sdi_root, use_source_sdi_root,
                                      target_sdi_root_override_set,
-                                     target_sdi_root_override, target_ibd);
+                                     target_sdi_root_override, target_ibd,
+                                     use_target_space_id, use_source_space_id,
+                                     target_space_id_override_set,
+                                     target_space_id_override);
   my_close(in_fd, MYF(0));
   my_close(out_fd, MYF(0));
   return ok ? 0 : 1;
