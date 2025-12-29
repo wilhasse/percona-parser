@@ -148,7 +148,7 @@ class Index_element {
 };
 }  // namespace dd
 
-// Simple base64 decoder to replace DD_instant_col_val_coder from dict0dd.h
+// Hex decoder to replace DD_instant_col_val_coder from dict0dd.h
 class DD_instant_col_val_coder {
  public:
   DD_instant_col_val_coder() : m_result(nullptr), m_result_len(0) {}
@@ -156,46 +156,46 @@ class DD_instant_col_val_coder {
 
   const byte* decode(const char* stream, size_t in_len, size_t* out_len) {
     cleanup();
-    // Base64 decoding
-    static const int8_t b64_table[256] = {
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
-        52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1,
-        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
-        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
-        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
-    };
-    size_t decoded_len = (in_len * 3) / 4;
-    if (in_len > 0 && stream[in_len - 1] == '=') decoded_len--;
-    if (in_len > 1 && stream[in_len - 2] == '=') decoded_len--;
+    if (in_len == 0 || (in_len % 2) != 0) {
+      if (out_len != nullptr) {
+        *out_len = 0;
+      }
+      return nullptr;
+    }
 
-    m_result = new byte[decoded_len + 1];
+    auto hex_val = [](unsigned char c) -> int {
+      if (c >= '0' && c <= '9') {
+        return c - '0';
+      }
+      if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+      }
+      if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+      }
+      return -1;
+    };
+
+    size_t decoded_len = in_len / 2;
+    m_result = new byte[decoded_len];
     m_result_len = decoded_len;
 
-    size_t j = 0;
-    uint32_t accum = 0;
-    int bits = 0;
-    for (size_t i = 0; i < in_len && stream[i] != '='; i++) {
-      int8_t val = b64_table[(unsigned char)stream[i]];
-      if (val < 0) continue;
-      accum = (accum << 6) | val;
-      bits += 6;
-      if (bits >= 8) {
-        bits -= 8;
-        if (j < decoded_len) m_result[j++] = (byte)(accum >> bits);
+    for (size_t i = 0; i < decoded_len; ++i) {
+      int hi = hex_val(static_cast<unsigned char>(stream[i * 2]));
+      int lo = hex_val(static_cast<unsigned char>(stream[i * 2 + 1]));
+      if (hi < 0 || lo < 0) {
+        cleanup();
+        if (out_len != nullptr) {
+          *out_len = 0;
+        }
+        return nullptr;
       }
+      m_result[i] = static_cast<byte>((hi << 4) | lo);
     }
-    *out_len = j;
+
+    if (out_len != nullptr) {
+      *out_len = decoded_len;
+    }
     return m_result;
   }
 
@@ -1624,41 +1624,53 @@ static bool build_cfg_table_from_sdi(const SdiMetadata& meta,
 
   // MySQL 8.0.29+ includes DB_ROW_ID in n_cols even for tables with explicit PK.
   // The SDI doesn't include it, but we need to add it for .cfg compatibility.
-  // Insert DB_ROW_ID before DB_TRX_ID.
+  // Insert DB_ROW_ID before DB_TRX_ID if missing.
   {
+    bool has_row_id = false;
     size_t trx_id_pos = cfg.columns.size();
     for (size_t i = 0; i < cfg.columns.size(); ++i) {
+      if (cfg.columns[i].name == "DB_ROW_ID") {
+        has_row_id = true;
+      }
       if (cfg.columns[i].name == "DB_TRX_ID") {
         trx_id_pos = i;
-        break;
       }
     }
 
-    CfgColumn row_id_col;
-    row_id_col.name = "DB_ROW_ID";
-    row_id_col.dd_type = dd::enum_column_types::LONG;  // Placeholder type
-    row_id_col.prtype = DATA_ROW_ID | DATA_NOT_NULL;  // 0 | 256 = 256
-    row_id_col.mtype = DATA_SYS;
-    row_id_col.len = DATA_ROW_ID_LEN;
-    row_id_col.mbminmaxlen = 0;
-    row_id_col.char_length = 0;
-    row_id_col.numeric_scale = 0;
-    row_id_col.collation_id = 0;
-    row_id_col.is_nullable = false;
-    row_id_col.is_unsigned = false;
-    row_id_col.ind = static_cast<uint32_t>(trx_id_pos);
-    row_id_col.version_added = UINT8_UNDEFINED;
-    row_id_col.version_dropped = UINT8_UNDEFINED;
-    row_id_col.is_instant_dropped = false;
-    row_id_col.phy_pos = UINT32_UNDEFINED;
-    row_id_col.has_instant_default = false;
-    row_id_col.instant_default_null = false;
+    if (!has_row_id) {
+      CfgColumn row_id_col;
+      row_id_col.name = "DB_ROW_ID";
+      row_id_col.dd_type = dd::enum_column_types::LONG;  // Placeholder type
+      row_id_col.prtype = DATA_ROW_ID | DATA_NOT_NULL;  // 0 | 256 = 256
+      row_id_col.mtype = DATA_SYS;
+      row_id_col.len = DATA_ROW_ID_LEN;
+      row_id_col.mbminmaxlen = 0;
+      row_id_col.char_length = 0;
+      row_id_col.numeric_scale = 0;
+      row_id_col.collation_id = 0;
+      row_id_col.is_nullable = false;
+      row_id_col.is_unsigned = false;
+      row_id_col.ind = static_cast<uint32_t>(trx_id_pos);
+      row_id_col.version_added = UINT8_UNDEFINED;
+      row_id_col.version_dropped = UINT8_UNDEFINED;
+      row_id_col.is_instant_dropped = false;
+      row_id_col.phy_pos = UINT32_UNDEFINED;
+      row_id_col.has_instant_default = false;
+      row_id_col.instant_default_null = false;
 
-    cfg.columns.insert(cfg.columns.begin() + trx_id_pos, std::move(row_id_col));
+      cfg.columns.insert(cfg.columns.begin() + trx_id_pos, std::move(row_id_col));
 
-    // Update indices for columns after DB_ROW_ID
-    for (size_t i = trx_id_pos + 1; i < cfg.columns.size(); ++i) {
-      cfg.columns[i].ind = static_cast<uint32_t>(i);
+      // Update indices for columns after DB_ROW_ID
+      for (size_t i = trx_id_pos + 1; i < cfg.columns.size(); ++i) {
+        cfg.columns[i].ind = static_cast<uint32_t>(i);
+      }
+
+      // Shift opx-to-column mapping for inserted DB_ROW_ID.
+      for (auto& idx : opx_to_col_index) {
+        if (idx >= 0 && static_cast<size_t>(idx) >= trx_id_pos) {
+          idx += 1;
+        }
+      }
     }
   }
 
