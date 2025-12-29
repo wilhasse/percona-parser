@@ -32,7 +32,9 @@
 #include "parser.h"
 #include "undrop_for_innodb.h"
 #include "my_time.h"
+#include "my_sys.h"
 #include "my_byteorder.h"
+#include "m_ctype.h"
 #include "decimal.h"
 
 // Undefine MySQL rec_offs_* if they exist
@@ -1362,6 +1364,58 @@ static std::string format_text(const unsigned char* ptr, ulint len, ulint max_le
   return out;
 }
 
+static std::string escape_control_bytes(const char* ptr, ulint len) {
+  std::string out;
+  out.reserve(static_cast<size_t>(len) + 16);
+  for (ulint i = 0; i < len; i++) {
+    unsigned char c = static_cast<unsigned char>(ptr[i]);
+    if (c >= 0x20 && c != 0x7F) {
+      out.push_back(static_cast<char>(c));
+    } else {
+      char buf[5];
+      std::snprintf(buf, sizeof(buf), "\\x%02X", c);
+      out.append(buf);
+    }
+  }
+  return out;
+}
+
+static std::string format_text_with_charset(const unsigned char* ptr,
+                                            ulint len,
+                                            unsigned int collation_id,
+                                            ulint max_len = 256) {
+  ulint to_convert = (len < max_len) ? len : max_len;
+  if (to_convert == 0) {
+    return std::string();
+  }
+
+  const CHARSET_INFO* from_cs = nullptr;
+  if (collation_id != 0) {
+    from_cs = get_charset(collation_id, MYF(0));
+  }
+  if (!from_cs) {
+    std::string out = format_text(ptr, len, max_len);
+    return out;
+  }
+
+  const CHARSET_INFO* to_cs = &my_charset_utf8mb4_bin;
+  size_t out_cap = static_cast<size_t>(to_convert) * to_cs->mbmaxlen + 1;
+  std::string converted(out_cap, '\0');
+  uint errors = 0;
+  size_t out_len = my_convert(converted.data(), out_cap, to_cs,
+                              reinterpret_cast<const char*>(ptr),
+                              static_cast<size_t>(to_convert),
+                              from_cs, &errors);
+  converted.resize(out_len);
+
+  std::string out = escape_control_bytes(converted.data(),
+                                         static_cast<ulint>(converted.size()));
+  if (len > max_len) {
+    out.append("...(truncated)");
+  }
+  return out;
+}
+
 static std::string format_extern(const unsigned char* ptr, ulint len, ulint max_len = 32) {
   std::string out = "<extern:";
   out.append(std::to_string(static_cast<unsigned long long>(len)));
@@ -1403,8 +1457,10 @@ static FieldOutput format_field_value(const field_def_t& field,
           out.value = format_hex(reinterpret_cast<const unsigned char*>(lob_data.data()),
                                  lob_data.size(), max_len);
         } else {
-          out.value = format_text(reinterpret_cast<const unsigned char*>(lob_data.data()),
-                                  lob_data.size(), max_len);
+          out.value = format_text_with_charset(
+              reinterpret_cast<const unsigned char*>(lob_data.data()),
+              static_cast<ulint>(lob_data.size()),
+              field.collation_id, static_cast<ulint>(max_len));
         }
         if (truncated) {
           out.value.append("...(truncated)");
@@ -1463,7 +1519,8 @@ static FieldOutput format_field_value(const field_def_t& field,
     }
     case FT_CHAR:
     case FT_TEXT:
-      out.value = format_text(field_ptr, field_len);
+      out.value = format_text_with_charset(field_ptr, field_len,
+                                           field.collation_id);
       break;
     case FT_BLOB:
     case FT_BIN:

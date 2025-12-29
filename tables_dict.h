@@ -65,6 +65,7 @@ typedef enum field_type {
 typedef struct field_def {
 	char *name;
 	char *charset;
+	unsigned int collation_id;
 	field_type_t type;
 	unsigned int min_length;
 	unsigned int max_length;

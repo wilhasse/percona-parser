@@ -2,7 +2,7 @@
 ,
 {
 	"type": 1,
-	"id": 1635,
+	"id": 1741,
 	"object":
 		{
     "mysqld_version_id": 80044,
@@ -12,8 +12,8 @@
     "dd_object": {
         "name": "lob_fixture",
         "mysql_version_id": 80044,
-        "created": 20251229113448,
-        "last_altered": 20251229113448,
+        "created": 20251229135244,
+        "last_altered": 20251229135244,
         "hidden": 1,
         "options": "avg_row_length=0;encrypt_type=N;explicit_encryption=0;key_block_size=0;keys_disabled=0;pack_record=1;row_type=2;stats_auto_recalc=0;stats_sample_pages=0;",
         "columns": [
@@ -46,7 +46,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1651;",
+                "se_private_data": "table_id=1722;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 2,
@@ -84,7 +84,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1651;",
+                "se_private_data": "table_id=1722;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -122,7 +122,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1651;",
+                "se_private_data": "table_id=1722;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -160,7 +160,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1651;",
+                "se_private_data": "table_id=1722;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -198,7 +198,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "",
-                "se_private_data": "table_id=1651;",
+                "se_private_data": "table_id=1722;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -236,7 +236,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "",
-                "se_private_data": "table_id=1651;",
+                "se_private_data": "table_id=1722;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -247,7 +247,7 @@
             }
         ],
         "schema_ref": "test_lob_decode",
-        "se_private_id": 1651,
+        "se_private_id": 1722,
         "engine": "InnoDB",
         "last_checked_for_upgrade_version_id": 0,
         "comment": "",
@@ -271,7 +271,7 @@
                 "ordinal_position": 1,
                 "comment": "",
                 "options": "flags=0;",
-                "se_private_data": "id=1283;root=4;space_id=175;table_id=1651;trx_id=1876675;",
+                "se_private_data": "id=1345;root=4;space_id=237;table_id=1722;trx_id=1891422;",
                 "type": 1,
                 "algorithm": 2,
                 "is_algorithm_explicit": false,
@@ -336,7 +336,7 @@
 ,
 {
 	"type": 2,
-	"id": 179,
+	"id": 241,
 	"object":
 		{
     "mysqld_version_id": 80044,
@@ -347,14 +347,14 @@
         "name": "test_lob_decode/lob_fixture",
         "comment": "",
         "options": "autoextend_size=0;encryption=N;",
-        "se_private_data": "flags=16417;id=175;server_version=80044;space_version=1;state=normal;",
+        "se_private_data": "flags=16417;id=237;server_version=80044;space_version=1;state=normal;",
         "engine": "InnoDB",
         "engine_attribute": "",
         "files": [
             {
                 "ordinal_position": 1,
                 "filename": "./test_lob_decode/lob_fixture.ibd",
-                "se_private_data": "id=175;"
+                "se_private_data": "id=237;"
             }
         ]
     }

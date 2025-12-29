@@ -69,6 +69,7 @@ struct MyColumnDef {
     std::string name;            // e.g., "id", "name", ...
     std::string type_utf8;       // e.g., "int", "char", "varchar"
     uint32_t    char_length = 0;
+    uint32_t    collation_id = 0;
     bool        is_nullable = false;
     bool        is_unsigned = false;
     bool        is_virtual = false;
@@ -838,6 +839,7 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
 
         // (A) Name
         fld->name = strdup(col.name.c_str());
+        fld->collation_id = col.collation_id;
 
         // (B) is_nullable => can_be_null
         // If the JSON had is_nullable => g_columns[i].nullable, adapt.
@@ -1195,6 +1197,13 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
 
         if (c.HasMember("char_length") && c["char_length"].IsUint()) {
             def.char_length = c["char_length"].GetUint();
+        }
+        if (c.HasMember("collation_id")) {
+            if (c["collation_id"].IsUint()) {
+                def.collation_id = c["collation_id"].GetUint();
+            } else if (c["collation_id"].IsInt()) {
+                def.collation_id = static_cast<uint32_t>(c["collation_id"].GetInt());
+            }
         }
 
         if (c.HasMember("is_nullable") && c["is_nullable"].IsBool()) {
