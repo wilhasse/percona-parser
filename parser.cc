@@ -3,7 +3,11 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <algorithm>
+#include <cctype>
+#include <limits>
 #include <cstdio>
+#include <cstdlib>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/istreamwrapper.h>
@@ -61,9 +65,16 @@ struct XdesCache {
 struct MyColumnDef {
     std::string name;            // e.g., "id", "name", ...
     std::string type_utf8;       // e.g., "int", "char", "varchar"
-    uint32_t    length;          // For char(N), the N, or 4 if int
-    bool        is_nullable;     // Add this
-    bool        is_unsigned;     // Add this too since it's used
+    uint32_t    char_length = 0;
+    bool        is_nullable = false;
+    bool        is_unsigned = false;
+    bool        is_virtual = false;
+    int         hidden = 0;
+    int         ordinal_position = 0;
+    int         numeric_precision = 0;
+    int         numeric_scale = 0;
+    int         datetime_precision = 0;
+    size_t      elements_count = 0;
 };
 
 /** We store the columns here, loaded from JSON. */
@@ -400,6 +411,129 @@ bool is_primary_index(const unsigned char* page)
   return (high == g_primary_index_id.high && low == g_primary_index_id.low);
 }
 
+static std::string to_lower_copy(const std::string& in) {
+  std::string out = in;
+  std::transform(out.begin(), out.end(), out.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return out;
+}
+
+static bool parse_first_paren_number(const std::string& s, unsigned int* out) {
+  size_t l = s.find('(');
+  size_t r = s.find(')', l == std::string::npos ? 0 : l + 1);
+  if (l == std::string::npos || r == std::string::npos || r <= l + 1) {
+    return false;
+  }
+  std::string inner = s.substr(l + 1, r - l - 1);
+  char* end = nullptr;
+  unsigned long val = std::strtoul(inner.c_str(), &end, 10);
+  if (end == inner.c_str()) {
+    return false;
+  }
+  *out = static_cast<unsigned int>(val);
+  return true;
+}
+
+static bool parse_two_paren_numbers(const std::string& s, int* a, int* b) {
+  size_t l = s.find('(');
+  size_t r = s.find(')', l == std::string::npos ? 0 : l + 1);
+  if (l == std::string::npos || r == std::string::npos || r <= l + 1) {
+    return false;
+  }
+  std::string inner = s.substr(l + 1, r - l - 1);
+  size_t comma = inner.find(',');
+  if (comma == std::string::npos) {
+    char* end = nullptr;
+    long val = std::strtol(inner.c_str(), &end, 10);
+    if (end == inner.c_str()) {
+      return false;
+    }
+    *a = static_cast<int>(val);
+    *b = 0;
+    return true;
+  }
+  std::string left = inner.substr(0, comma);
+  std::string right = inner.substr(comma + 1);
+  char* end_left = nullptr;
+  char* end_right = nullptr;
+  long val_left = std::strtol(left.c_str(), &end_left, 10);
+  long val_right = std::strtol(right.c_str(), &end_right, 10);
+  if (end_left == left.c_str() || end_right == right.c_str()) {
+    return false;
+  }
+  *a = static_cast<int>(val_left);
+  *b = static_cast<int>(val_right);
+  return true;
+}
+
+static unsigned int decimal_storage_bytes(int precision, int scale) {
+  static const unsigned char dig2bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+  if (precision <= 0) {
+    return 0;
+  }
+  if (scale < 0) {
+    scale = 0;
+  }
+  int intg = precision - scale;
+  if (intg < 0) {
+    intg = 0;
+  }
+  int intg0 = intg / 9;
+  int intg0x = intg - intg0 * 9;
+  int frac0 = scale / 9;
+  int frac0x = scale - frac0 * 9;
+  unsigned int bytes = 0;
+  bytes += static_cast<unsigned int>(intg0 * 4);
+  bytes += dig2bytes[intg0x];
+  bytes += static_cast<unsigned int>(frac0 * 4);
+  bytes += dig2bytes[frac0x];
+  return bytes;
+}
+
+static unsigned int temporal_storage_bytes(const std::string& type, int precision) {
+  if (precision < 0) {
+    precision = 0;
+  }
+  if (precision > 6) {
+    precision = 6;
+  }
+  unsigned int frac = static_cast<unsigned int>((precision + 1) / 2);
+  if (type == "datetime") {
+    return 5 + frac;
+  }
+  if (type == "timestamp") {
+    return 4 + frac;
+  }
+  if (type == "time") {
+    return 3 + frac;
+  }
+  return 0;
+}
+
+static void set_fixed(field_def_t* fld, unsigned int len) {
+  fld->fixed_length = static_cast<int>(len);
+  fld->min_length = len;
+  fld->max_length = len;
+}
+
+static void set_var(field_def_t* fld, unsigned int max_len) {
+  fld->fixed_length = 0;
+  fld->min_length = 0;
+  fld->max_length = max_len;
+}
+
+static bool is_internal_column_name(const std::string& name) {
+  return (name == "DB_TRX_ID" || name == "DB_ROLL_PTR" || name == "DB_ROW_ID");
+}
+
+static unsigned int internal_column_length(const std::string& name,
+                                            unsigned int fallback) {
+  if (name == "DB_TRX_ID") return 6;
+  if (name == "DB_ROLL_PTR") return 7;
+  if (name == "DB_ROW_ID") return 6;
+  return fallback;
+}
+
 /**
  * build_table_def_from_json():
  *   Creates a table_def_t from the columns in g_columns.
@@ -425,60 +559,197 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
             return 1;
         }
 
+        const MyColumnDef& col = g_columns[i];
         field_def_t* fld = &table->fields[colcount];
         std::memset(fld, 0, sizeof(*fld));
 
         // (A) Name
-        fld->name = strdup(g_columns[i].name.c_str());
+        fld->name = strdup(col.name.c_str());
 
         // (B) is_nullable => can_be_null
         // If the JSON had is_nullable => g_columns[i].nullable, adapt.
         // Let's assume we store is_nullable in g_columns[i].is_nullable:
-        fld->can_be_null = g_columns[i].is_nullable;
+        fld->can_be_null = col.is_nullable;
 
         // (C) If the JSON had "is_unsigned" => store or adapt type
         // For example, if we see "int" + is_unsigned => FT_UINT
-        bool is_unsigned = g_columns[i].is_unsigned; // e.g. from JSON
+        bool is_unsigned = col.is_unsigned;
+        std::string type = to_lower_copy(col.type_utf8);
 
-        // (D) "type_utf8" => decide the main field type
-        if (g_columns[i].type_utf8.find("int") != std::string::npos) {
-            if (is_unsigned) {
-                fld->type = FT_UINT;
-            } else {
-                fld->type = FT_INT;
+        if (is_internal_column_name(col.name) || (type.empty() && col.hidden > 1)) {
+            fld->type = FT_INTERNAL;
+            unsigned int len = internal_column_length(col.name, col.char_length);
+            set_fixed(fld, len);
+            colcount++;
+            continue;
+        }
+
+        if (type.empty()) {
+            if (col.char_length == 0) {
+                std::cerr << "[Warn] Column '" << col.name
+                          << "' has no type and no length, skipping.\n";
+                continue;
             }
-            // 4 bytes typical
-            fld->fixed_length = 4;
-            // For check_fields_sizes => maybe min_length=4, max_length=4
-            fld->min_length = 4;
-            fld->max_length = 4;
+            fld->type = FT_INTERNAL;
+            set_fixed(fld, col.char_length);
+            colcount++;
+            continue;
+        }
 
-        } else if (g_columns[i].type_utf8.find("char") != std::string::npos) {
-            // Suppose "char(N)" => fixed_length = N
-            // or "varchar(N)" => fixed_length=0, max_length=N
-            // For a simplistic approach, do:
+        if (type.find("tinyint") != std::string::npos ||
+            type == "bool" || type == "boolean") {
+            fld->type = is_unsigned ? FT_UINT : FT_INT;
+            set_fixed(fld, 1);
+
+        } else if (type.find("smallint") != std::string::npos) {
+            fld->type = is_unsigned ? FT_UINT : FT_INT;
+            set_fixed(fld, 2);
+
+        } else if (type.find("mediumint") != std::string::npos) {
+            fld->type = is_unsigned ? FT_UINT : FT_INT;
+            set_fixed(fld, 3);
+
+        } else if (type.find("bigint") != std::string::npos) {
+            fld->type = is_unsigned ? FT_UINT : FT_INT;
+            set_fixed(fld, 8);
+
+        } else if (type.find("int") != std::string::npos ||
+                   type.find("integer") != std::string::npos) {
+            fld->type = is_unsigned ? FT_UINT : FT_INT;
+            set_fixed(fld, 4);
+
+        } else if (type.find("float") != std::string::npos) {
+            fld->type = FT_FLOAT;
+            set_fixed(fld, 4);
+
+        } else if (type.find("double") != std::string::npos) {
+            fld->type = FT_DOUBLE;
+            set_fixed(fld, 8);
+
+        } else if (type.find("decimal") != std::string::npos ||
+                   type.find("numeric") != std::string::npos) {
+            fld->type = FT_DECIMAL;
+            int precision = col.numeric_precision;
+            int scale = col.numeric_scale;
+            if (precision == 0 && scale == 0) {
+                parse_two_paren_numbers(type, &precision, &scale);
+            }
+            fld->decimal_precision = precision;
+            fld->decimal_digits = scale;
+            unsigned int len = decimal_storage_bytes(precision, scale);
+            if (len == 0 && col.char_length > 0) {
+                len = col.char_length;
+            }
+            set_fixed(fld, len);
+
+        } else if (type.find("datetime") != std::string::npos) {
+            fld->type = FT_DATETIME;
+            fld->time_precision = col.datetime_precision;
+            set_fixed(fld, temporal_storage_bytes("datetime", col.datetime_precision));
+
+        } else if (type.find("timestamp") != std::string::npos) {
+            fld->type = FT_TIMESTAMP;
+            fld->time_precision = col.datetime_precision;
+            set_fixed(fld, temporal_storage_bytes("timestamp", col.datetime_precision));
+
+        } else if (type.find("time") != std::string::npos) {
+            fld->type = FT_TIME;
+            fld->time_precision = col.datetime_precision;
+            set_fixed(fld, temporal_storage_bytes("time", col.datetime_precision));
+
+        } else if (type.find("date") != std::string::npos) {
+            fld->type = FT_DATE;
+            set_fixed(fld, 3);
+
+        } else if (type.find("year") != std::string::npos) {
+            fld->type = FT_YEAR;
+            set_fixed(fld, 1);
+
+        } else if (type.find("bit") != std::string::npos) {
+            fld->type = FT_BIT;
+            unsigned int bits = col.char_length;
+            parse_first_paren_number(type, &bits);
+            unsigned int bytes = (bits + 7) / 8;
+            set_fixed(fld, bytes);
+
+        } else if (type.find("varbinary") != std::string::npos) {
+            fld->type = FT_BIN;
+            unsigned int max_len = col.char_length;
+            parse_first_paren_number(type, &max_len);
+            set_var(fld, max_len);
+
+        } else if (type.find("binary") != std::string::npos) {
+            fld->type = FT_BIN;
+            unsigned int len = col.char_length;
+            parse_first_paren_number(type, &len);
+            set_fixed(fld, len);
+
+        } else if (type.find("varchar") != std::string::npos) {
             fld->type = FT_CHAR;
-            // if we see something like "char(1)", we do:
-            fld->fixed_length = 0; // treat as variable
-            fld->min_length = 0;
-            fld->max_length = g_columns[i].length; 
-            // (If your code wants a truly fixed CHAR(1), you can do that logic.)
+            unsigned int max_len = col.char_length;
+            parse_first_paren_number(type, &max_len);
+            set_var(fld, max_len);
 
-        } else if (g_columns[i].type_utf8.find("datetime") != std::string::npos) {
-            // Usually datetime is 5 or 8 bytes in "undrop" logic
-            fld->type         = FT_DATETIME;
-            fld->fixed_length = 5; // or 8
-            // min_length=5, max_length=5 for check_fields_sizes
-            fld->min_length   = 5;
-            fld->max_length   = 5;
+        } else if (type.find("char") != std::string::npos) {
+            fld->type = FT_CHAR;
+            unsigned int len = col.char_length;
+            parse_first_paren_number(type, &len);
+            set_fixed(fld, len);
+
+        } else if (type.find("tinytext") != std::string::npos) {
+            fld->type = FT_TEXT;
+            set_var(fld, 255);
+
+        } else if (type.find("mediumtext") != std::string::npos) {
+            fld->type = FT_TEXT;
+            set_var(fld, 16777215);
+
+        } else if (type.find("longtext") != std::string::npos) {
+            fld->type = FT_TEXT;
+            set_var(fld, 0xFFFFFFFFu);
+
+        } else if (type.find("text") != std::string::npos) {
+            fld->type = FT_TEXT;
+            set_var(fld, 65535);
+
+        } else if (type.find("tinyblob") != std::string::npos) {
+            fld->type = FT_BLOB;
+            set_var(fld, 255);
+
+        } else if (type.find("mediumblob") != std::string::npos) {
+            fld->type = FT_BLOB;
+            set_var(fld, 16777215);
+
+        } else if (type.find("longblob") != std::string::npos) {
+            fld->type = FT_BLOB;
+            set_var(fld, 0xFFFFFFFFu);
+
+        } else if (type.find("blob") != std::string::npos) {
+            fld->type = FT_BLOB;
+            set_var(fld, 65535);
+
+        } else if (type.find("enum") != std::string::npos) {
+            fld->type = FT_ENUM;
+            unsigned int len = (col.elements_count > 255) ? 2 : 1;
+            set_fixed(fld, len);
+
+        } else if (type.find("set") != std::string::npos) {
+            fld->type = FT_SET;
+            unsigned int len = static_cast<unsigned int>((col.elements_count + 7) / 8);
+            if (len == 0) {
+                len = 1;
+            }
+            set_fixed(fld, len);
+
+        } else if (type.find("json") != std::string::npos ||
+                   type.find("geometry") != std::string::npos) {
+            fld->type = FT_BLOB;
+            set_var(fld, 0xFFFFFFFFu);
 
         } else {
-            // fallback => treat as text
             fld->type = FT_TEXT;
-            fld->fixed_length = 0; 
-            fld->min_length   = 0;
-            // if JSON has "char_length" => we do
-            fld->max_length   = g_columns[i].length;
+            unsigned int max_len = col.char_length > 0 ? col.char_length : 255;
+            set_var(fld, max_len);
         }
 
         // (E) Possibly parse numeric precision, scale => decimal_digits, etc.
@@ -596,44 +867,72 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
 
     // 5) Iterate the columns array
     for (auto& c : columns.GetArray()) {
-        // We expect "name", "column_type_utf8", "char_length" in each
-        if (!c.HasMember("name") || !c.HasMember("column_type_utf8") || !c.HasMember("char_length")) {
-            // Some columns might be hidden or missing fields
-            // That's typical for DB_TRX_ID, DB_ROLL_PTR, etc.
-            // We'll just skip them or give defaults.
-            // For demo, skip if missing 'name' or 'column_type_utf8'
-            if (!c.HasMember("name") || !c.HasMember("column_type_utf8")) {
-                std::cerr << "[Warn] A column is missing 'name' or 'column_type_utf8'. Skipping.\n";
-                continue;
-            }
+        if (!c.HasMember("name") || !c["name"].IsString()) {
+            std::cerr << "[Warn] Column is missing 'name'. Skipping.\n";
+            continue;
         }
 
         MyColumnDef def{};
-        def.name      = c["name"].GetString();
-        def.type_utf8 = c["column_type_utf8"].GetString();
+        def.name = c["name"].GetString();
 
-        // default length = 4 if "int"? 
-        // or from "char_length"
-        uint32_t length = 4; // fallback
-        if (c.HasMember("char_length") && c["char_length"].IsUint()) {
-            length = c["char_length"].GetUint();
+        if (c.HasMember("column_type_utf8") && c["column_type_utf8"].IsString()) {
+            def.type_utf8 = c["column_type_utf8"].GetString();
         }
 
-        def.length = length;
-        // optional flags
-        if (c.HasMember("is_nullable") && c["is_nullable"].IsBool())
-            def.is_nullable = c["is_nullable"].GetBool();
-        if (c.HasMember("is_unsigned") && c["is_unsigned"].IsBool())
-            def.is_unsigned = c["is_unsigned"].GetBool();
+        if (c.HasMember("char_length") && c["char_length"].IsUint()) {
+            def.char_length = c["char_length"].GetUint();
+        }
 
-        // Add to global vector
+        if (c.HasMember("is_nullable") && c["is_nullable"].IsBool()) {
+            def.is_nullable = c["is_nullable"].GetBool();
+        }
+        if (c.HasMember("is_unsigned") && c["is_unsigned"].IsBool()) {
+            def.is_unsigned = c["is_unsigned"].GetBool();
+        }
+        if (c.HasMember("is_virtual") && c["is_virtual"].IsBool()) {
+            def.is_virtual = c["is_virtual"].GetBool();
+        }
+        if (c.HasMember("hidden") && c["hidden"].IsInt()) {
+            def.hidden = c["hidden"].GetInt();
+        }
+        if (c.HasMember("ordinal_position") && c["ordinal_position"].IsInt()) {
+            def.ordinal_position = c["ordinal_position"].GetInt();
+        }
+        if (c.HasMember("numeric_precision") && c["numeric_precision"].IsInt()) {
+            def.numeric_precision = c["numeric_precision"].GetInt();
+        }
+        if (c.HasMember("numeric_scale") && c["numeric_scale"].IsInt()) {
+            def.numeric_scale = c["numeric_scale"].GetInt();
+        }
+        if (c.HasMember("datetime_precision") && c["datetime_precision"].IsInt()) {
+            def.datetime_precision = c["datetime_precision"].GetInt();
+        }
+        if (c.HasMember("elements") && c["elements"].IsArray()) {
+            def.elements_count = c["elements"].GetArray().Size();
+        }
+
+        if (def.is_virtual) {
+            continue;
+        }
+
         g_columns.push_back(def);
 
-        // Optional debug
         std::cout << "[Debug] Added column: name='" << def.name
                   << "', type='" << def.type_utf8
-                  << "', length=" << def.length << "\n";
+                  << "', char_length=" << def.char_length
+                  << ", ordinal=" << def.ordinal_position << "\n";
     }
+
+    std::stable_sort(g_columns.begin(), g_columns.end(),
+                     [](const MyColumnDef& a, const MyColumnDef& b) {
+                         int a_pos = a.ordinal_position == 0
+                                         ? std::numeric_limits<int>::max()
+                                         : a.ordinal_position;
+                         int b_pos = b.ordinal_position == 0
+                                         ? std::numeric_limits<int>::max()
+                                         : b.ordinal_position;
+                         return a_pos < b_pos;
+                     });
 
     ifs.close();
     return 0;

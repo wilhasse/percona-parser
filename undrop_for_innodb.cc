@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cctype>
 
 // MySQL includes
 #include "tables_dict.h"
@@ -249,6 +250,53 @@ bool check_for_a_record(page_t *page, rec_t *rec, table_def_t *table, ulint *off
 // global so we can print header once
 static bool g_printed_header = false;
 
+static uint64_t read_be_uint(const unsigned char* ptr, size_t len) {
+  uint64_t val = 0;
+  for (size_t i = 0; i < len; i++) {
+    val = (val << 8) | ptr[i];
+  }
+  return val;
+}
+
+static int64_t read_be_int_signed(const unsigned char* ptr, size_t len) {
+  if (len == 0 || len > 8) {
+    return 0;
+  }
+  uint64_t val = read_be_uint(ptr, len);
+  uint64_t sign_mask = 1ULL << (len * 8 - 1);
+  val ^= sign_mask;
+  if (val & sign_mask && len < 8) {
+    uint64_t mask = ~0ULL << (len * 8);
+    val |= mask;
+  }
+  return static_cast<int64_t>(val);
+}
+
+static void print_hex(const unsigned char* ptr, ulint len, ulint max_len = 64) {
+  ulint to_print = (len < max_len) ? len : max_len;
+  for (ulint i = 0; i < to_print; i++) {
+    printf("%02X", ptr[i]);
+  }
+  if (len > max_len) {
+    printf("...");
+  }
+}
+
+static void print_text(const unsigned char* ptr, ulint len, ulint max_len = 256) {
+  ulint to_print = (len < max_len) ? len : max_len;
+  for (ulint i = 0; i < to_print; i++) {
+    unsigned char c = ptr[i];
+    if (std::isprint(c)) {
+      putchar(static_cast<int>(c));
+    } else {
+      printf("\\x%02X", c);
+    }
+  }
+  if (len > max_len) {
+    printf("...(truncated)");
+  }
+}
+
 /** process_ibrec() => print columns in pipe-separated format. */
 ulint process_ibrec(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets, bool hex)
 {
@@ -273,14 +321,73 @@ ulint process_ibrec(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets
   for (ulint i = 0; i < (ulint)table->fields_count; i++) {
     ulint field_len;
     const unsigned char* field_ptr = my_rec_get_nth_field(rec, offsets, i, &field_len);
+    bool is_extern = my_rec_offs_nth_extern(offsets, i);
 
     if (field_len == UNIV_SQL_NULL) {
       // print "NULL"
       printf("NULL");
     } else {
-      // naive approach: print as text 
-      // (for real usage, interpret as int/binary if needed)
-      printf("%.*s", (int)field_len, (const char*)field_ptr);
+      if (is_extern) {
+        printf("<extern:%lu:", (unsigned long)field_len);
+        print_hex(field_ptr, field_len, 32);
+        printf(">");
+      } else if (hex) {
+        print_hex(field_ptr, field_len);
+      } else {
+        switch (table->fields[i].type) {
+          case FT_INT: {
+            int64_t val = read_be_int_signed(field_ptr, field_len);
+            printf("%lld", static_cast<long long>(val));
+            break;
+          }
+          case FT_UINT: {
+            uint64_t val = read_be_uint(field_ptr, field_len);
+            printf("%llu", static_cast<unsigned long long>(val));
+            break;
+          }
+          case FT_FLOAT: {
+            if (field_len == 4) {
+              uint32_t raw = static_cast<uint32_t>(read_be_uint(field_ptr, 4));
+              float f = 0.0f;
+              std::memcpy(&f, &raw, sizeof(f));
+              printf("%f", f);
+            } else {
+              print_hex(field_ptr, field_len);
+            }
+            break;
+          }
+          case FT_DOUBLE: {
+            if (field_len == 8) {
+              uint64_t raw = read_be_uint(field_ptr, 8);
+              double d = 0.0;
+              std::memcpy(&d, &raw, sizeof(d));
+              printf("%f", d);
+            } else {
+              print_hex(field_ptr, field_len);
+            }
+            break;
+          }
+          case FT_CHAR:
+          case FT_TEXT:
+            print_text(field_ptr, field_len);
+            break;
+          case FT_BIN:
+          case FT_BLOB:
+          case FT_INTERNAL:
+          case FT_DECIMAL:
+          case FT_DATE:
+          case FT_TIME:
+          case FT_DATETIME:
+          case FT_TIMESTAMP:
+          case FT_ENUM:
+          case FT_SET:
+          case FT_BIT:
+          case FT_YEAR:
+          default:
+            print_hex(field_ptr, field_len);
+            break;
+        }
+      }
     }
 
     if (i < (ulint)(table->fields_count - 1)) {
