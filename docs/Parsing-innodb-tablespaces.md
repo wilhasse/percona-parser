@@ -178,22 +178,38 @@ mysql -uroot test_import -e "ALTER TABLE mytable IMPORT TABLESPACE;"
 
 # Current Capabilities Summary
 
-* Decrypt, decompress, and parse clustered index leaf rows.
-* Decode LOB/ZLOB, JSON binary, charset-aware text, DATETIME.
-* Rebuild compressed tablespaces to 16KB with SDI restored (in-page or external).
-* Remap index IDs during rebuild using target SDI for cross-table imports.
-* Parse PRIMARY or secondary index leaf records via `--index`.
+**Decryption & Decompression:**
+* Decrypt encrypted tablespaces using Percona keyring (Mode 1, 4).
+* Decompress ROW_FORMAT=COMPRESSED tablespaces (Mode 2, 4).
 
-# Open Work / Next Steps
+**Parsing (Mode 3):**
+* Parse clustered index (PRIMARY) or secondary index leaf records via `--index=NAME|ID`.
+* List available indexes with `--list-indexes`.
+* Decode all MySQL data types: INT, DECIMAL, DATE, TIME, DATETIME, TIMESTAMP, YEAR, ENUM, SET.
+* Decode LOB/ZLOB external references (LONGTEXT, LONGBLOB).
+* Decode JSON binary format.
+* Charset-aware text decoding (latin1, utf8mb4, etc.).
+* Output formats: pipe-separated (default), CSV, JSON Lines.
+* Include row metadata (page/offset) with `--with-meta`.
 
-* Harden .cfg generation for instant/row-version edge cases.
-* Add secondary index reconstruction for import.
-* Improve diagnostics for index-id mismatches during import.
+**Rebuild for Import (Mode 5):**
+* Rebuild compressed tablespaces to 16KB DYNAMIC format.
+* Restore SDI from JSON (in-page or external BLOB pages).
+* Remap index IDs using `--target-sdi-json` for cross-table imports.
+* Generate `.cfg` files for IMPORT TABLESPACE via `--cfg-out`.
+* Validate remap without rebuilding using `--validate-remap` (dry-run diff).
+* Detect and warn on SDI root page mismatches; use `--use-target-sdi-root` to override.
+* Detect and warn on space_id mismatches; use `--use-target-space-id` to remap.
 
 # References in the repo
 
+* `tests/run_all_tests.sh` (comprehensive test suite)
 * `tests/test_sdi_rebuild.sh` (end-to-end rebuild + import)
 * `tests/test_sdi_external.sh` (external SDI BLOB rebuild)
 * `tests/test_index_id_remap.sh` (target SDI remap + import)
+* `tests/test_validate_remap.sh` (dry-run validation with SDI diff)
+* `tests/test_cfg_import.sh` (CFG generation for instant columns)
+* `tests/test_secondary_index.sh` (secondary index parsing)
 * `tests/test_types_decode.sh`, `test_charset_decode.sh`, `test_json_decode.sh`
+* `tests/test_lob_decode.sh`, `test_zlob_decode.sh`
 * `docs/Architecture.md`, `docs/Testing.md`
