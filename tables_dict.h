@@ -55,6 +55,7 @@ typedef enum field_type {
 	FT_SET,			// supported
 	FT_BLOB,		// supported
 	FT_TEXT,		// supported
+	FT_JSON,		// supported
 	FT_BIT,			// supported
 	FT_DECIMAL,		// supported
 	FT_TIMESTAMP,	// supported

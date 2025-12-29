@@ -12,6 +12,7 @@ This directory contains test scripts for validating the ib_parser tool's functio
 | `test_encrypted_compressed.sh` | ⚠️ **Partial** | Tests combined encryption + compression | Percona Server 8.0+ |
 | `test_types_decode.sh` | ✅ **Working** | Generates fixture and validates type decoding | MySQL 8.0+ + ibd2sdi |
 | `test_charset_decode.sh` | ✅ **Working** | Validates charset-aware decoding for UTF-8/latin1 text | MySQL 8.0+ + ibd2sdi |
+| `test_json_decode.sh` | ✅ **Working** | Validates JSON binary decoding for JSON columns | MySQL 8.0+ + ibd2sdi |
 | `test_lob_decode.sh` | ✅ **Working** | Validates external LOB (TEXT/BLOB) reconstruction | MySQL 8.0+ + ibd2sdi |
 | `test_zlob_decode.sh` | ✅ **Working** | Validates compressed LOB (ZLOB) reconstruction | MySQL 8.0+ + ibd2sdi |
 | `run_all_tests.sh` | ✅ **Working** | Runs all test scripts sequentially | All of the above |
@@ -150,6 +151,22 @@ Executes all test scenarios and reports results.
 **How to run:**
 ```bash
 ./test_charset_decode.sh
+```
+
+**Notes:**
+- Requires `python3` for JSON normalization during compare
+
+---
+
+### `test_json_decode.sh`
+**What it does:**
+- Creates a table with a JSON column (objects, arrays, booleans, null, UTF-8)
+- Exports fixture files to `tests/json_test.ibd` and `tests/json_test_sdi.json`
+- Parses with `ib_parser` and compares JSONL output to MySQL
+
+**How to run:**
+```bash
+./test_json_decode.sh
 ```
 
 **Notes:**

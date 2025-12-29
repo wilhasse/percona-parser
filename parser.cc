@@ -385,6 +385,7 @@ void debug_print_table_def(const table_def_t *table)
         case FT_UINT:       type_str = "FT_UINT";     break;
         case FT_CHAR:       type_str = "FT_CHAR";     break;
         case FT_TEXT:       type_str = "FT_TEXT";     break;
+        case FT_JSON:       type_str = "FT_JSON";     break;
         case FT_BLOB:       type_str = "FT_BLOB";     break;
         case FT_BIN:        type_str = "FT_BIN";      break;
         case FT_DATE:       type_str = "FT_DATE";     break;
@@ -1028,8 +1029,11 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
             }
             set_fixed(fld, len);
 
-        } else if (type.find("json") != std::string::npos ||
-                   type.find("geometry") != std::string::npos) {
+        } else if (type.find("json") != std::string::npos) {
+            fld->type = FT_JSON;
+            set_var(fld, 0xFFFFFFFFu);
+
+        } else if (type.find("geometry") != std::string::npos) {
             fld->type = FT_BLOB;
             set_var(fld, 0xFFFFFFFFu);
 

@@ -133,8 +133,9 @@ if [ "$JSON_OUTPUT" != "true" ] || [ "$VERBOSE" = "true" ]; then
     echo "3. Encrypted + Compressed tables"
     echo "4. Type decoding (DECIMAL, DATE, TIME, ENUM, SET)"
     echo "5. Charset-aware decoding (latin1 + utf8mb4)"
-    echo "6. LOB external decoding (LONGTEXT, LONGBLOB)"
-    echo "7. ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)"
+    echo "6. JSON binary decoding (JSON columns)"
+    echo "7. LOB external decoding (LONGTEXT, LONGBLOB)"
+    echo "8. ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)"
     echo ""
     if [ "$VERBOSE" = "true" ]; then
         echo -e "${CYAN}Verbose mode enabled - showing real-time output${NC}"
@@ -243,7 +244,16 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
-# Test 6: LOB external decoding (LONGTEXT, LONGBLOB)
+# Test 6: JSON binary decoding (JSON columns)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "JSON_DECODING" "$SCRIPT_DIR/test_json_decode.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+[ "$JSON_OUTPUT" != "true" ] && echo ""
+
+# Test 7: LOB external decoding (LONGTEXT, LONGBLOB)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "LOB_DECODING" "$SCRIPT_DIR/test_lob_decode.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
@@ -252,7 +262,7 @@ else
 fi
 [ "$JSON_OUTPUT" != "true" ] && echo ""
 
-# Test 7: ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)
+# Test 8: ZLOB compressed decoding (ROW_FORMAT=COMPRESSED)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "ZLOB_DECODING" "$SCRIPT_DIR/test_zlob_decode.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))

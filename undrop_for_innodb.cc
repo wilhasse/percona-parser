@@ -34,6 +34,7 @@
 #include "my_time.h"
 #include "my_sys.h"
 #include "my_byteorder.h"
+#include "m_string.h"
 #include "m_ctype.h"
 #include "decimal.h"
 
@@ -212,7 +213,8 @@ inline bool ibrec_init_offsets_new(const page_t* page,
         ulint lenbyte = *lens--;
         if (fld->max_length > 255
             || fld->type == FT_BLOB
-            || fld->type == FT_TEXT) {
+            || fld->type == FT_TEXT
+            || fld->type == FT_JSON) {
           if (lenbyte & 0x80) {
             lenbyte <<= 8;
             lenbyte |= *lens--;
@@ -1416,6 +1418,398 @@ static std::string format_text_with_charset(const unsigned char* ptr,
   return out;
 }
 
+constexpr uint8_t JSONB_TYPE_SMALL_OBJECT = 0x0;
+constexpr uint8_t JSONB_TYPE_LARGE_OBJECT = 0x1;
+constexpr uint8_t JSONB_TYPE_SMALL_ARRAY = 0x2;
+constexpr uint8_t JSONB_TYPE_LARGE_ARRAY = 0x3;
+constexpr uint8_t JSONB_TYPE_LITERAL = 0x4;
+constexpr uint8_t JSONB_TYPE_INT16 = 0x5;
+constexpr uint8_t JSONB_TYPE_UINT16 = 0x6;
+constexpr uint8_t JSONB_TYPE_INT32 = 0x7;
+constexpr uint8_t JSONB_TYPE_UINT32 = 0x8;
+constexpr uint8_t JSONB_TYPE_INT64 = 0x9;
+constexpr uint8_t JSONB_TYPE_UINT64 = 0xA;
+constexpr uint8_t JSONB_TYPE_DOUBLE = 0xB;
+constexpr uint8_t JSONB_TYPE_STRING = 0xC;
+constexpr uint8_t JSONB_TYPE_OPAQUE = 0xF;
+
+constexpr uint8_t JSONB_NULL_LITERAL = 0x0;
+constexpr uint8_t JSONB_TRUE_LITERAL = 0x1;
+constexpr uint8_t JSONB_FALSE_LITERAL = 0x2;
+
+constexpr uint8_t JSONB_SMALL_OFFSET_SIZE = 2;
+constexpr uint8_t JSONB_LARGE_OFFSET_SIZE = 4;
+constexpr uint8_t JSONB_KEY_ENTRY_SIZE_SMALL = 2 + JSONB_SMALL_OFFSET_SIZE;
+constexpr uint8_t JSONB_KEY_ENTRY_SIZE_LARGE = 2 + JSONB_LARGE_OFFSET_SIZE;
+constexpr uint8_t JSONB_VALUE_ENTRY_SIZE_SMALL = 1 + JSONB_SMALL_OFFSET_SIZE;
+constexpr uint8_t JSONB_VALUE_ENTRY_SIZE_LARGE = 1 + JSONB_LARGE_OFFSET_SIZE;
+
+static bool json_inlined_type(uint8_t type, bool large) {
+  switch (type) {
+    case JSONB_TYPE_LITERAL:
+    case JSONB_TYPE_INT16:
+    case JSONB_TYPE_UINT16:
+      return true;
+    case JSONB_TYPE_INT32:
+    case JSONB_TYPE_UINT32:
+      return large;
+    default:
+      return false;
+  }
+}
+
+static uint8_t json_offset_size(bool large) {
+  return large ? JSONB_LARGE_OFFSET_SIZE : JSONB_SMALL_OFFSET_SIZE;
+}
+
+static uint8_t json_key_entry_size(bool large) {
+  return large ? JSONB_KEY_ENTRY_SIZE_LARGE : JSONB_KEY_ENTRY_SIZE_SMALL;
+}
+
+static uint8_t json_value_entry_size(bool large) {
+  return large ? JSONB_VALUE_ENTRY_SIZE_LARGE : JSONB_VALUE_ENTRY_SIZE_SMALL;
+}
+
+static bool json_read_varlen(const unsigned char* data,
+                             size_t data_len,
+                             uint32_t* length,
+                             uint8_t* num) {
+  size_t max_bytes = std::min(data_len, static_cast<size_t>(5));
+  size_t len = 0;
+  for (size_t i = 0; i < max_bytes; i++) {
+    len |= static_cast<size_t>(data[i] & 0x7f) << (7 * i);
+    if ((data[i] & 0x80) == 0) {
+      if (len > UINT32_MAX) {
+        return false;
+      }
+      *num = static_cast<uint8_t>(i + 1);
+      *length = static_cast<uint32_t>(len);
+      return true;
+    }
+  }
+  return false;
+}
+
+static uint32_t json_read_offset_or_size(const unsigned char* data, bool large) {
+  return large ? uint4korr(data) : uint2korr(data);
+}
+
+static void json_append_string(std::string& out,
+                               const char* data,
+                               size_t len) {
+  out.push_back('"');
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = static_cast<unsigned char>(data[i]);
+    switch (c) {
+      case '\\': out.append("\\\\"); break;
+      case '"': out.append("\\\""); break;
+      case '\b': out.append("\\b"); break;
+      case '\f': out.append("\\f"); break;
+      case '\n': out.append("\\n"); break;
+      case '\r': out.append("\\r"); break;
+      case '\t': out.append("\\t"); break;
+      default:
+        if (c < 0x20) {
+          char buf[7];
+          std::snprintf(buf, sizeof(buf), "\\u%04X", c);
+          out.append(buf);
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
+        break;
+    }
+  }
+  out.push_back('"');
+}
+
+static bool json_append_double(double val, std::string& out) {
+  char buf[MY_GCVT_MAX_FIELD_WIDTH + 1];
+  bool err = false;
+  size_t n = my_gcvt(val, MY_GCVT_ARG_DOUBLE, MY_GCVT_MAX_FIELD_WIDTH, buf, &err);
+  if (err) {
+    return false;
+  }
+  out.append(buf, n);
+  return true;
+}
+
+static bool json_decode_value(uint8_t type,
+                              const unsigned char* data,
+                              size_t len,
+                              std::string& out,
+                              int depth);
+
+static bool json_decode_scalar(uint8_t type,
+                               const unsigned char* data,
+                               size_t len,
+                               std::string& out) {
+  switch (type) {
+    case JSONB_TYPE_LITERAL:
+      if (len < 1) {
+        return false;
+      }
+      switch (data[0]) {
+        case JSONB_NULL_LITERAL:
+          out.append("null");
+          return true;
+        case JSONB_TRUE_LITERAL:
+          out.append("true");
+          return true;
+        case JSONB_FALSE_LITERAL:
+          out.append("false");
+          return true;
+        default:
+          return false;
+      }
+    case JSONB_TYPE_INT16:
+      if (len < 2) {
+        return false;
+      }
+      out.append(std::to_string(static_cast<long long>(sint2korr(data))));
+      return true;
+    case JSONB_TYPE_INT32:
+      if (len < 4) {
+        return false;
+      }
+      out.append(std::to_string(static_cast<long long>(sint4korr(data))));
+      return true;
+    case JSONB_TYPE_INT64:
+      if (len < 8) {
+        return false;
+      }
+      out.append(std::to_string(static_cast<long long>(sint8korr(data))));
+      return true;
+    case JSONB_TYPE_UINT16:
+      if (len < 2) {
+        return false;
+      }
+      out.append(std::to_string(static_cast<unsigned long long>(uint2korr(data))));
+      return true;
+    case JSONB_TYPE_UINT32:
+      if (len < 4) {
+        return false;
+      }
+      out.append(std::to_string(static_cast<unsigned long long>(uint4korr(data))));
+      return true;
+    case JSONB_TYPE_UINT64:
+      if (len < 8) {
+        return false;
+      }
+      out.append(std::to_string(static_cast<unsigned long long>(uint8korr(data))));
+      return true;
+    case JSONB_TYPE_DOUBLE: {
+      if (len < 8) {
+        return false;
+      }
+      double val = float8get(data);
+      if (!json_append_double(val, out)) {
+        out.append(std::to_string(val));
+      }
+      return true;
+    }
+    case JSONB_TYPE_STRING: {
+      uint32_t str_len = 0;
+      uint8_t n = 0;
+      if (!json_read_varlen(data, len, &str_len, &n)) {
+        return false;
+      }
+      if (len < static_cast<size_t>(n) + str_len) {
+        return false;
+      }
+      json_append_string(out, reinterpret_cast<const char*>(data + n), str_len);
+      return true;
+    }
+    case JSONB_TYPE_OPAQUE: {
+      if (len < 1) {
+        return false;
+      }
+      uint8_t type_byte = data[0];
+      uint32_t val_len = 0;
+      uint8_t n = 0;
+      if (!json_read_varlen(data + 1, len - 1, &val_len, &n)) {
+        return false;
+      }
+      if (len < 1 + static_cast<size_t>(n) + val_len) {
+        return false;
+      }
+      std::string hex = format_hex(data + 1 + n, val_len, val_len);
+      std::string opaque = "opaque(" + std::to_string(type_byte) + "):" + hex;
+      json_append_string(out, opaque.c_str(), opaque.size());
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+static bool json_decode_array(const unsigned char* data,
+                              size_t len,
+                              bool large,
+                              std::string& out,
+                              int depth) {
+  const uint8_t offset_size = json_offset_size(large);
+  if (len < 2 * offset_size) {
+    return false;
+  }
+
+  const uint32_t element_count = json_read_offset_or_size(data, large);
+  const uint32_t bytes = json_read_offset_or_size(data + offset_size, large);
+  if (bytes > len) {
+    return false;
+  }
+
+  const size_t header_size = 2 * offset_size +
+                             static_cast<size_t>(element_count) *
+                                 json_value_entry_size(large);
+  if (header_size > bytes) {
+    return false;
+  }
+
+  out.push_back('[');
+  const size_t entry_size = json_value_entry_size(large);
+  const size_t entries_base = 2 * offset_size;
+  for (uint32_t i = 0; i < element_count; i++) {
+    if (i > 0) {
+      out.push_back(',');
+    }
+    const size_t entry_offset = entries_base + i * entry_size;
+    if (entry_offset + entry_size > bytes) {
+      return false;
+    }
+    const uint8_t type = static_cast<uint8_t>(data[entry_offset]);
+    if (json_inlined_type(type, large)) {
+      if (!json_decode_scalar(type, data + entry_offset + 1, entry_size - 1, out)) {
+        return false;
+      }
+      continue;
+    }
+    const uint32_t value_offset =
+        json_read_offset_or_size(data + entry_offset + 1, large);
+    if (value_offset < header_size || value_offset >= bytes) {
+      return false;
+    }
+    if (!json_decode_value(type, data + value_offset, bytes - value_offset,
+                           out, depth + 1)) {
+      return false;
+    }
+  }
+  out.push_back(']');
+  return true;
+}
+
+static bool json_decode_object(const unsigned char* data,
+                               size_t len,
+                               bool large,
+                               std::string& out,
+                               int depth) {
+  const uint8_t offset_size = json_offset_size(large);
+  if (len < 2 * offset_size) {
+    return false;
+  }
+
+  const uint32_t element_count = json_read_offset_or_size(data, large);
+  const uint32_t bytes = json_read_offset_or_size(data + offset_size, large);
+  if (bytes > len) {
+    return false;
+  }
+
+  const size_t header_size = 2 * offset_size +
+                             static_cast<size_t>(element_count) *
+                                 (json_key_entry_size(large) +
+                                  json_value_entry_size(large));
+  if (header_size > bytes) {
+    return false;
+  }
+
+  out.push_back('{');
+  const size_t key_entry_size = json_key_entry_size(large);
+  const size_t val_entry_size = json_value_entry_size(large);
+  const size_t key_entries_base = 2 * offset_size;
+  const size_t val_entries_base =
+      key_entries_base + static_cast<size_t>(element_count) * key_entry_size;
+
+  for (uint32_t i = 0; i < element_count; i++) {
+    if (i > 0) {
+      out.push_back(',');
+    }
+
+    const size_t key_entry_offset = key_entries_base + i * key_entry_size;
+    if (key_entry_offset + key_entry_size > bytes) {
+      return false;
+    }
+    const uint32_t key_offset = json_read_offset_or_size(data + key_entry_offset, large);
+    const uint16_t key_len = uint2korr(data + key_entry_offset + offset_size);
+    if (key_offset < header_size ||
+        key_offset + key_len > bytes) {
+      return false;
+    }
+
+    json_append_string(out,
+                       reinterpret_cast<const char*>(data + key_offset),
+                       key_len);
+    out.push_back(':');
+
+    const size_t val_entry_offset = val_entries_base + i * val_entry_size;
+    if (val_entry_offset + val_entry_size > bytes) {
+      return false;
+    }
+    const uint8_t type = static_cast<uint8_t>(data[val_entry_offset]);
+    if (json_inlined_type(type, large)) {
+      if (!json_decode_scalar(type, data + val_entry_offset + 1,
+                              val_entry_size - 1, out)) {
+        return false;
+      }
+      continue;
+    }
+    const uint32_t value_offset =
+        json_read_offset_or_size(data + val_entry_offset + 1, large);
+    if (value_offset < header_size || value_offset >= bytes) {
+      return false;
+    }
+    if (!json_decode_value(type, data + value_offset, bytes - value_offset,
+                           out, depth + 1)) {
+      return false;
+    }
+  }
+
+  out.push_back('}');
+  return true;
+}
+
+static bool json_decode_value(uint8_t type,
+                              const unsigned char* data,
+                              size_t len,
+                              std::string& out,
+                              int depth) {
+  if (depth > 200) {
+    return false;
+  }
+  switch (type) {
+    case JSONB_TYPE_SMALL_OBJECT:
+      return json_decode_object(data, len, false, out, depth);
+    case JSONB_TYPE_LARGE_OBJECT:
+      return json_decode_object(data, len, true, out, depth);
+    case JSONB_TYPE_SMALL_ARRAY:
+      return json_decode_array(data, len, false, out, depth);
+    case JSONB_TYPE_LARGE_ARRAY:
+      return json_decode_array(data, len, true, out, depth);
+    default:
+      return json_decode_scalar(type, data, len, out);
+  }
+}
+
+static bool json_decode_binary(const unsigned char* data,
+                               size_t len,
+                               std::string& out) {
+  out.clear();
+  if (len == 0) {
+    out.assign("null");
+    return true;
+  }
+  return json_decode_value(static_cast<uint8_t>(data[0]),
+                           data + 1, len - 1, out, 0);
+}
+
 static std::string format_extern(const unsigned char* ptr, ulint len, ulint max_len = 32) {
   std::string out = "<extern:";
   out.append(std::to_string(static_cast<unsigned long long>(len)));
@@ -1428,6 +1822,7 @@ static std::string format_extern(const unsigned char* ptr, ulint len, ulint max_
 struct FieldOutput {
   bool is_null = false;
   bool is_numeric = false;
+  bool is_json = false;
   std::string value;
 };
 
@@ -1445,7 +1840,8 @@ static FieldOutput format_field_value(const field_def_t& field,
   if (is_extern) {
     if (!hex &&
         (field.type == FT_TEXT || field.type == FT_BLOB ||
-         field.type == FT_CHAR || field.type == FT_BIN)) {
+         field.type == FT_CHAR || field.type == FT_BIN ||
+         field.type == FT_JSON)) {
       std::string lob_data;
       bool truncated = false;
       if (read_external_lob_value(field_ptr, field_len, lob_data, truncated)) {
@@ -1456,6 +1852,20 @@ static FieldOutput format_field_value(const field_def_t& field,
         if (field.type == FT_BLOB || field.type == FT_BIN) {
           out.value = format_hex(reinterpret_cast<const unsigned char*>(lob_data.data()),
                                  lob_data.size(), max_len);
+        } else if (field.type == FT_JSON) {
+          if (!truncated &&
+              json_decode_binary(
+                  reinterpret_cast<const unsigned char*>(lob_data.data()),
+                  lob_data.size(), out.value)) {
+            out.is_json = true;
+          } else {
+            out.value = format_hex(
+                reinterpret_cast<const unsigned char*>(lob_data.data()),
+                lob_data.size(), max_len);
+            if (truncated) {
+              out.value.append("...(truncated)");
+            }
+          }
         } else {
           out.value = format_text_with_charset(
               reinterpret_cast<const unsigned char*>(lob_data.data()),
@@ -1522,6 +1932,16 @@ static FieldOutput format_field_value(const field_def_t& field,
       out.value = format_text_with_charset(field_ptr, field_len,
                                            field.collation_id);
       break;
+    case FT_JSON: {
+      std::string decoded;
+      if (json_decode_binary(field_ptr, field_len, decoded)) {
+        out.value.swap(decoded);
+        out.is_json = true;
+      } else {
+        out.value = format_hex(field_ptr, field_len, field_len);
+      }
+      break;
+    }
     case FT_BLOB:
     case FT_BIN:
       out.value = format_hex(field_ptr, field_len, field_len);
@@ -1730,6 +2150,8 @@ ulint process_ibrec(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets
       std::fputc(':', out);
       if (value.is_null) {
         std::fputs("null", out);
+      } else if (value.is_json) {
+        std::fputs(value.value.c_str(), out);
       } else if (value.is_numeric) {
         std::fputs(value.value.c_str(), out);
       } else {
