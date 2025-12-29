@@ -44,9 +44,10 @@ Decompress or rebuild:
 
 ## Docs and Tests
 
-- Build and setup: `docs/Building.md`
-- Testing guide: `docs/Testing.md`
-- SDI rebuild test: `tests/test_sdi_rebuild.sh`
+- Build and setup: [docs/Building.md](docs/Building.md)
+- Testing guide: [docs/Testing.md](docs/Testing.md)
+- InnoDB parsing guide: [docs/Parsing-innodb-tablespaces.md](docs/Parsing-innodb-tablespaces.md)
+- SDI rebuild test: [tests/test_sdi_rebuild.sh](tests/test_sdi_rebuild.sh)
 
 ## License
 
