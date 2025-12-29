@@ -1,0 +1,173 @@
+===========================================
+Testing Mode 5: SDI Rebuild with --sdi-json
+===========================================
+
+[1;33mStep 1: Checking prerequisites[0m
+  Source .ibd: /home/cslog/mysql/percona-parser/tests/compressed_test.ibd (65536 bytes)
+  Source SDI:  /home/cslog/mysql/percona-parser/tests/compressed_test_sdi.json
+  ib_parser:   /home/cslog/mysql/percona-parser/build/ib_parser
+
+[1;33mStep 2: Running Mode 5 with --sdi-json[0m
+[0;36m  [CMD] ./build/ib_parser 5 /home/cslog/mysql/percona-parser/tests/compressed_test.ibd /tmp/sdi_rebuild_test.ibd --sdi-json=/home/cslog/mysql/percona-parser/tests/compressed_test_sdi.json[0m
+
+========================================
+REBUILD STARTING (EXPERIMENTAL)
+========================================
+Input file size: 65536 bytes
+Physical page size: 8192, Logical page size: 16384
+Total pages: 8
+========================================
+
+  [DEBUG] Page type 8 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=8, size=8192)
+SDI header: version=1 root_page=3 (json=/home/cslog/mysql/percona-parser/tests/compressed_test_sdi.json)
+  [DEBUG] Page type 5 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=5, size=8192)
+  [DEBUG] Page type 3 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=3, size=8192)
+  [DEBUG] Page should be decompressed (type=17853 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17853, phys=8192->logical=16384)
+  [DEBUG] Decompressing SDI page
+  [DEBUG] Page should be decompressed (type=17855 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17855, phys=8192->logical=16384)
+  [DEBUG] Successfully decompressed INDEX page
+  [DEBUG] Page should be decompressed (type=17855 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17855, phys=8192->logical=16384)
+  [DEBUG] Successfully decompressed INDEX page
+  [DEBUG] Page should be decompressed (type=17855 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17855, phys=8192->logical=16384)
+  [DEBUG] Successfully decompressed INDEX page
+  [DEBUG] Page type 0 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=0, size=8192)
+[PROGRESS] Rebuilt 8/8 pages (100.0%)
+
+========================================
+REBUILD COMPLETE (EXPERIMENTAL)
+========================================
+Output pages written: 8
+========================================
+
+[0;32m  ✓ Mode 5 completed successfully[0m
+
+[1;33mStep 3: Verifying output file[0m
+  Output file: /tmp/sdi_rebuild_test.ibd (131072 bytes)
+[0;32m  ✓ Output file created[0m
+
+[1;33mStep 4: Testing with ibd2sdi[0m
+[0;36m  [CMD] ibd2sdi /tmp/sdi_rebuild_test.ibd[0m
+[0;32m  ✓ ibd2sdi can read the file[0m
+  SDI output saved to /tmp/sdi_output.json
+  Table in SDI: "name": "compressed_test"
+
+[1;33mStep 5: Testing with innochecksum[0m
+[0;36m  [CMD] innochecksum /tmp/sdi_rebuild_test.ibd[0m
+[0;32m  ✓ innochecksum passed[0m
+
+[1;33mStep 6: Page type summary[0m
+[0;36m  [CMD] innochecksum -S /tmp/sdi_rebuild_test.ibd[0m
+
+File::/tmp/sdi_rebuild_test.ibd
+================PAGE TYPE SUMMARY==============
+#PAGE_COUNT	PAGE_TYPE
+===============================================
+       3	Index page
+       1	SDI Index page
+       0	Undo log page
+       1	Inode page
+       0	Insert buffer free list page
+       1	Freshly allocated page
+       1	Insert buffer bitmap
+       0	System page
+       0	Transaction system page
+       1	File Space Header
+       0	Extent descriptor page
+       0	BLOB page
+       0	Compressed BLOB page
+       0	Subsequent Compressed BLOB page
+       0	SDI BLOB page
+       0	Compressed SDI BLOB page
+       0	Other type of page
+===============================================
+Additional information:
+Undo page type: 0 insert, 0 update, 0 other
+Undo page state: 0 active, 0 cached, 0 to_free, 0 to_purge, 0 prepared, 0 other
+
+[1;33mStep 7: Preparing MySQL for import test[0m
+[0;36m  [MySQL] DROP DATABASE IF EXISTS test_sdi_rebuild;[0m
+  Stopping MySQL to clean up...
+[0;36m  [MySQL] CREATE DATABASE test_sdi_rebuild;[0m
+
+[1;33mStep 8: Creating table with matching structure[0m
+  Table structure (from SDI):
+  - id INT PRIMARY KEY AUTO_INCREMENT
+  - name VARCHAR(100)
+  - description TEXT
+  - created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+[0;36m  [MySQL] CREATE TABLE compressed_imported (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(100),
+    description TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+) ROW_FORMAT=DYNAMIC;[0m
+
+[1;33mStep 9: Discarding tablespace[0m
+[0;36m  [MySQL] ALTER TABLE compressed_imported DISCARD TABLESPACE;[0m
+
+[1;33mStep 10: Copying rebuilt .ibd file[0m
+  Stopping MySQL...
+[0;36m  [CMD] cp /tmp/sdi_rebuild_test.ibd /var/lib/mysql/test_sdi_rebuild/compressed_imported.ibd[0m
+  File copied to: /var/lib/mysql/test_sdi_rebuild/compressed_imported.ibd
+  Starting MySQL...
+
+[1;33mStep 11: Attempting IMPORT TABLESPACE[0m
+[0;36m  [MySQL] ALTER TABLE compressed_imported IMPORT TABLESPACE;[0m
+
+[0;32m  ✓ IMPORT TABLESPACE succeeded![0m
+
+[1;33mStep 12: Checking MySQL error log (last 30 lines)[0m
+[0;36m  [CMD] grep crash/signal/corruption in /var/log/mysql/error.log[0m
+InnoDB: If you get repeated assertion failures or crashes, even
+InnoDB: corruption in the InnoDB tablespace. Please refer to
+2025-12-29T15:43:35Z UTC - mysqld got signal 6 ;
+in the manual which will help you identify the cause of the crash.
+2025-12-29T15:43:36.423972Z 0 [System] [MY-010229] [Server] Starting XA crash recovery...
+2025-12-29T15:43:36.429883Z 0 [System] [MY-010232] [Server] XA crash recovery finished.
+2025-12-29T16:06:35.950506Z 0 [System] [MY-013172] [Server] Received SHUTDOWN from user <via user signal>. Shutting down mysqld (Version: 8.0.44-35).
+2025-12-29T16:06:43.906035Z 0 [System] [MY-013172] [Server] Received SHUTDOWN from user <via user signal>. Shutting down mysqld (Version: 8.0.44-35).
+2025-12-29T16:06:51.077306Z 10 [Warning] [MY-012378] [InnoDB] Reading max(auto_inc_col) = 55 for table `test_sdi_rebuild`.`compressed_imported`, because there was an IMPORT without cfg file.
+2025-12-29T16:09:05.620529Z 0 [System] [MY-013172] [Server] Received SHUTDOWN from user <via user signal>. Shutting down mysqld (Version: 8.0.44-35).
+2025-12-29T16:09:13.304419Z 0 [System] [MY-013172] [Server] Received SHUTDOWN from user <via user signal>. Shutting down mysqld (Version: 8.0.44-35).
+2025-12-29T16:09:20.493780Z 10 [Warning] [MY-012378] [InnoDB] Reading max(auto_inc_col) = 55 for table `test_sdi_rebuild`.`compressed_imported`, because there was an IMPORT without cfg file.
+2025-12-29T16:10:00.074882Z 0 [System] [MY-013172] [Server] Received SHUTDOWN from user <via user signal>. Shutting down mysqld (Version: 8.0.44-35).
+2025-12-29T16:10:07.532062Z 0 [System] [MY-013172] [Server] Received SHUTDOWN from user <via user signal>. Shutting down mysqld (Version: 8.0.44-35).
+2025-12-29T16:10:14.684996Z 10 [Warning] [MY-012378] [InnoDB] Reading max(auto_inc_col) = 55 for table `test_sdi_rebuild`.`compressed_imported`, because there was an IMPORT without cfg file.
+
+[1;33mStep 13: Attempting to query imported data[0m
+[0;36m  [MySQL] SELECT * FROM compressed_imported LIMIT 5;[0m
+id	name	description	created_at
+1	Product A	This is a test product with a longer description to have some data to compress	2025-12-28 18:31:37
+2	Product B	Another product entry with different content for testing purposes	2025-12-28 18:31:37
+3	Product C	Third item in our test dataset with various characters and text	2025-12-28 18:31:37
+4	Product D	Fourth entry to add more rows to the compressed table test	2025-12-28 18:31:37
+5	Product E	Fifth product with extended description text for compression testing	2025-12-28 18:31:37
+
+===========================================
+Test Summary
+===========================================
+
+Source files:
+  .ibd: /home/cslog/mysql/percona-parser/tests/compressed_test.ibd
+  .json: /home/cslog/mysql/percona-parser/tests/compressed_test_sdi.json
+
+Output file:
+  /tmp/sdi_rebuild_test.ibd
+
+Test results:
+  Mode 5 rebuild:    [0;32mPASS[0m
+  ibd2sdi:           [0;32mPASS[0m
+  innochecksum:      [0;32mPASS[0m
+  MySQL IMPORT:      [0;32mPASS[0m
+
+Database 'test_sdi_rebuild' kept for inspection. Drop manually if needed:
+  mysql -uroot -e 'DROP DATABASE test_sdi_rebuild;'
+

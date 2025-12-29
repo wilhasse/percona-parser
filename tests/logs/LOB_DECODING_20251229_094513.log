@@ -1,0 +1,10 @@
+Using MySQL time_zone: -03:00
+==> Creating fixture schema and data
+==> Exporting .ibd and SDI
+==> Parsing with ib_parser
+discover_primary_index_id: Found primary root at page=4  index_id=0:1299
+==> Comparing against MySQL output
+OK: ib_parser output matches MySQL.
+==> Fixture written to:
+    /home/cslog/mysql/percona-parser/tests/lob_test.ibd
+    /home/cslog/mysql/percona-parser/tests/lob_test_sdi.json

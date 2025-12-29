@@ -1,0 +1,7 @@
+===========================================
+Testing ENCRYPTED + COMPRESSED Table Processing
+===========================================
+[1;33mStep 1: Checking encryption availability[0m
+[0;36m  [SQL] CREATE DATABASE IF NOT EXISTS _encryption_test_tmp_ (encryption check)[0m
+[1;33mSKIPPED: Encryption not available (keyring not configured)[0m
+To enable encryption, configure keyring component in Percona 8.0

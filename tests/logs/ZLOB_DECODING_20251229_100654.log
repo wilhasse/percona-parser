@@ -1,0 +1,16 @@
+Using MySQL time_zone: -03:00
+==> Creating compressed fixture schema and data
+==> Exporting .ibd and SDI
+==> Parsing with ib_parser
+  [DEBUG] Page should be decompressed (type=17855 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17855, phys=8192->logical=16384)
+  [DEBUG] Successfully decompressed INDEX page
+discover_primary_index_id: Found primary root at page=4  index_id=0:1326
+  [DEBUG] Page should be decompressed (type=17855 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17855, phys=8192->logical=16384)
+  [DEBUG] Successfully decompressed INDEX page
+==> Comparing against MySQL output
+OK: ib_parser output matches MySQL.
+==> Fixture written to:
+    /home/cslog/mysql/percona-parser/tests/zlob_test.ibd
+    /home/cslog/mysql/percona-parser/tests/zlob_test_sdi.json

@@ -1,0 +1,79 @@
+===========================================
+Testing COMPRESSED Table Processing
+===========================================
+[1;33mStep 1: Creating test database and compressed table[0m
+Performing complete cleanup of test databases...
+[0;36m  [SQL] DROP DATABASE IF EXISTS test_compression[0m
+[0;36m  [SQL] DROP DATABASE IF EXISTS test_compression_import[0m
+[0;36m  [SQL] CREATE DATABASE test_compression[0m
+[0;36m  [SQL] CREATE TABLE test_compressed (id INT, data VARCHAR(255), number INT, created_at TIMESTAMP) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8[0m
+row_count
+40
+[0;36m  [SQL] INSERT INTO test_compressed: 5 rows + 3 rounds of generated data (~40 rows)[0m
+[1;33mStep 2: Flushing table and getting .ibd file path[0m
+[0;36m  [SQL] FLUSH TABLES test_compressed FOR EXPORT[0m
+[0;36m  [SQL] UNLOCK TABLES[0m
+[1;33mStep 3: Decompressing with ib_parser[0m
+
+========================================
+DECOMPRESSION STARTING
+========================================
+Input file size: 57344 bytes
+Page size - Physical: 8192 bytes, Logical: 16384 bytes
+Total pages to process: 7
+Compression ratio: 2.00:1 (if compressed)
+========================================
+
+[Page 0] Reading page (physical size=8192, logical size=16384)
+[Page 0] Page type: 8 (FIL_PAGE_TYPE_FSP_HDR)
+  [DEBUG] Page type 8 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=8, size=8192)
+[Page 0] Processing completed successfully (output size=8192)
+[Page 1] Reading page (physical size=8192, logical size=16384)
+[Page 1] Page type: 5 (FIL_PAGE_IBUF_BITMAP)
+  [DEBUG] Page type 5 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=5, size=8192)
+[Page 1] Processing completed successfully (output size=8192)
+[Page 2] Reading page (physical size=8192, logical size=16384)
+[Page 2] Page type: 3 (FIL_PAGE_INODE)
+  [DEBUG] Page type 3 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=3, size=8192)
+[Page 2] Processing completed successfully (output size=8192)
+[Page 3] Reading page (physical size=8192, logical size=16384)
+[Page 3] Page type: 17853 (FIL_PAGE_SDI)
+  [DEBUG] Page should be decompressed (type=17853 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17853, phys=8192->logical=16384)
+  [DEBUG] Decompressing SDI page
+[Page 3] Processing completed successfully (output size=16384)
+[Page 4] Reading page (physical size=8192, logical size=16384)
+[Page 4] Page type: 17855 (FIL_PAGE_INDEX)
+  [DEBUG] Page should be decompressed (type=17855 in compressed tablespace)
+  [DEBUG] Decompressing page (type=17855, phys=8192->logical=16384)
+  [DEBUG] Successfully decompressed INDEX page
+[Page 4] Processing completed successfully (output size=16384)
+[Page 5] Reading page (physical size=8192, logical size=16384)
+[Page 5] Page type: 0 (FIL_PAGE_TYPE_ALLOCATED)
+  [DEBUG] Page type 0 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=0, size=8192)
+[Page 5] Processing completed successfully (output size=8192)
+[Page 6] Reading page (physical size=8192, logical size=16384)
+[Page 6] Page type: 0 (FIL_PAGE_TYPE_ALLOCATED)
+  [DEBUG] Page type 0 in compressed tablespace - metadata page, no decompression needed
+  [DEBUG] Copying page as-is at physical size (type=0, size=8192)
+[Page 6] Processing completed successfully (output size=8192)
+[PROGRESS] Processed 7/7 pages (100.0%)
+
+========================================
+DECOMPRESSION COMPLETE
+========================================
+Total pages: 7
+Successfully processed: 7
+Pages written: 7
+Failed pages: 0
+Tablespace was compressed (physical=8192, logical=16384)
+INDEX pages decompressed with zlib to logical size
+Metadata pages kept at physical size (as stored on disk)
+Output has mixed page sizes - INDEX pages at logical size, metadata at physical
+Output file written successfully
+========================================
+

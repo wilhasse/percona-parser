@@ -1,0 +1,6 @@
+===========================================
+Testing ENCRYPTED + COMPRESSED Table Processing
+===========================================
+[1;33mStep 1: Enabling encryption in Percona Server[0m
+Enabling table encryption...
+ERROR 1193 (HY000) at line 1: Unknown system variable 'innodb_encrypt_tables'

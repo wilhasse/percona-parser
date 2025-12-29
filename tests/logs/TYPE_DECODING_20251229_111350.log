@@ -1,0 +1,15 @@
+Using MySQL time_zone: -03:00
+==> Creating fixture schema and data
+[0;36m  [SQL] DROP DATABASE IF EXISTS test_types_decode[0m
+[0;36m  [SQL] CREATE DATABASE test_types_decode[0m
+[0;36m  [SQL] CREATE TABLE types_fixture with columns: id INT, amount DECIMAL(10,2), d DATE, t TIME(6), dt DATETIME(6), ts TIMESTAMP, y YEAR, e ENUM, s SET, b BIT(10), note VARCHAR(50)[0m
+[0;36m  [SQL] INSERT INTO types_fixture VALUES (1, 1234.56, '2024-12-31', ...), (2, -0.99, '2001-01-02', ...)[0m
+==> Exporting .ibd and SDI
+[0;36m  [SQL] FLUSH TABLES types_fixture FOR EXPORT[0m
+==> Parsing with ib_parser
+discover_primary_index_id: Found primary root at page=4  index_id=0:1355
+==> Comparing against MySQL output
+OK: ib_parser output matches MySQL.
+==> Fixture written to:
+    /home/cslog/mysql/percona-parser/tests/types_test.ibd
+    /home/cslog/mysql/percona-parser/tests/types_test_sdi.json

@@ -1,0 +1,9 @@
+===========================================
+Testing COMPRESSED Table Processing
+===========================================
+[1;33mStep 1: Creating test database and compressed table[0m
+Performing complete cleanup of test databases...
+row_count
+40
+[1;33mStep 2: Flushing table and getting .ibd file path[0m
+cp: não foi possível criar arquivo comum '/home/cslog/percona-parser/tests/ibd_files/test_compressed_compressed.ibd': Arquivo ou diretório inexistente
