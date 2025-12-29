@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cctype>
 #include <string>
+#include <vector>
 
 // MySQL includes
 #include "tables_dict.h"
@@ -22,6 +23,9 @@
 #include "rem0rec.h"
 #include "parser.h"
 #include "undrop_for_innodb.h"
+#include "my_time.h"
+#include "my_byteorder.h"
+#include "decimal.h"
 
 // Undefine MySQL rec_offs_* if they exist
 #ifdef rec_offs_nth_size
@@ -299,6 +303,146 @@ static int64_t read_be_int_signed(const unsigned char* ptr, size_t len) {
   return static_cast<int64_t>(val);
 }
 
+static unsigned int max_decimals_from_len(ulint len, ulint base_len) {
+  if (len <= base_len) {
+    return 0;
+  }
+  ulint frac_bytes = len - base_len;
+  unsigned int max_dec = static_cast<unsigned int>(frac_bytes * 2);
+  if (max_dec > 6) {
+    max_dec = 6;
+  }
+  return max_dec;
+}
+
+static bool format_innodb_date(const unsigned char* ptr, ulint len, std::string& out) {
+  if (!ptr || len < 3) {
+    return false;
+  }
+  uint32_t raw = uint3korr(ptr);
+  MYSQL_TIME tm{};
+  tm.time_type = MYSQL_TIMESTAMP_DATE;
+  tm.year = static_cast<unsigned int>(raw / (16 * 32));
+  tm.month = static_cast<unsigned int>((raw / 32) % 16);
+  tm.day = static_cast<unsigned int>(raw % 32);
+  char buf[MAX_DATE_STRING_REP_LENGTH];
+  int n = my_date_to_str(tm, buf);
+  out.assign(buf, static_cast<size_t>(n));
+  return true;
+}
+
+static bool format_innodb_time(const unsigned char* ptr, ulint len,
+                               unsigned int dec, std::string& out) {
+  if (!ptr || len < 3) {
+    return false;
+  }
+  if (dec > 6) {
+    dec = 6;
+  }
+  unsigned int max_dec = max_decimals_from_len(len, 3);
+  if (dec > max_dec) {
+    dec = max_dec;
+  }
+  longlong packed = my_time_packed_from_binary(ptr, dec);
+  MYSQL_TIME tm{};
+  TIME_from_longlong_time_packed(&tm, packed);
+  char buf[MAX_DATE_STRING_REP_LENGTH];
+  int n = my_time_to_str(tm, buf, dec);
+  out.assign(buf, static_cast<size_t>(n));
+  return true;
+}
+
+static bool format_decimal_value(const field_def_t& field,
+                                 const unsigned char* ptr,
+                                 ulint len,
+                                 std::string& out) {
+  int precision = field.decimal_precision;
+  int scale = field.decimal_digits;
+  if (precision <= 0 || scale < 0 || scale > precision) {
+    return false;
+  }
+  int bin_size = decimal_bin_size(precision, scale);
+  if (bin_size <= 0 || len < static_cast<ulint>(bin_size)) {
+    return false;
+  }
+  int buf_len = decimal_size(precision, scale);
+  if (buf_len <= 0) {
+    return false;
+  }
+  std::vector<decimal_digit_t> digits(static_cast<size_t>(buf_len));
+  decimal_t dec{};
+  dec.len = buf_len;
+  dec.buf = digits.data();
+  dec.intg = precision - scale;
+  dec.frac = scale;
+  int err = bin2decimal(ptr, &dec, precision, scale, false);
+  if (err & E_DEC_FATAL_ERROR) {
+    return false;
+  }
+  int str_len = decimal_string_size(&dec);
+  if (str_len <= 0) {
+    return false;
+  }
+  std::string tmp(static_cast<size_t>(str_len), '\0');
+  int out_len = str_len;
+  err = decimal2string(&dec, &tmp[0], &out_len);
+  if (err & E_DEC_FATAL_ERROR || out_len <= 0) {
+    return false;
+  }
+  tmp.resize(static_cast<size_t>(out_len));
+  out.swap(tmp);
+  return true;
+}
+
+static bool format_enum_value(const field_def_t& field,
+                              uint64_t idx,
+                              std::string& out) {
+  if (!field.has_limits || field.limits.enum_values_count <= 0) {
+    return false;
+  }
+  if (idx == 0) {
+    out.clear();
+    return true;
+  }
+  if (idx > static_cast<uint64_t>(field.limits.enum_values_count)) {
+    return false;
+  }
+  const char* value = field.limits.enum_values[idx - 1];
+  if (!value) {
+    return false;
+  }
+  out.assign(value);
+  return true;
+}
+
+static bool format_set_value(const field_def_t& field,
+                             uint64_t mask,
+                             std::string& out) {
+  if (!field.has_limits || field.limits.set_values_count <= 0) {
+    return false;
+  }
+  if (field.limits.set_values_count > 64) {
+    return false;
+  }
+  bool first = true;
+  std::string tmp;
+  for (int i = 0; i < field.limits.set_values_count; i++) {
+    if (mask & (1ULL << i)) {
+      const char* value = field.limits.set_values[i];
+      if (!value) {
+        return false;
+      }
+      if (!first) {
+        tmp.push_back(',');
+      }
+      tmp.append(value);
+      first = false;
+    }
+  }
+  out.swap(tmp);
+  return true;
+}
+
 static std::string format_hex(const unsigned char* ptr, ulint len, ulint max_len = 64) {
   std::string out;
   ulint to_print = (len < max_len) ? len : max_len;
@@ -414,6 +558,19 @@ static FieldOutput format_field_value(const field_def_t& field,
     case FT_TEXT:
       out.value = format_text(field_ptr, field_len);
       break;
+    case FT_DATE: {
+      std::string formatted;
+      bool ok = format_innodb_date(field_ptr, field_len, formatted);
+      out.value = ok ? formatted : format_hex(field_ptr, field_len);
+      break;
+    }
+    case FT_TIME: {
+      std::string formatted;
+      unsigned int dec = static_cast<unsigned int>(field.time_precision);
+      bool ok = format_innodb_time(field_ptr, field_len, dec, formatted);
+      out.value = ok ? formatted : format_hex(field_ptr, field_len);
+      break;
+    }
     case FT_DATETIME:
     case FT_TIMESTAMP: {
       std::string formatted;
@@ -425,6 +582,66 @@ static FieldOutput format_field_value(const field_def_t& field,
         ok = format_innodb_timestamp(field_ptr, field_len, dec, formatted);
       }
       out.value = ok ? formatted : format_hex(field_ptr, field_len);
+      break;
+    }
+    case FT_YEAR: {
+      if (field_len == 1) {
+        unsigned int year = field_ptr[0] == 0 ? 0 : 1900 + field_ptr[0];
+        char buf[5];
+        std::snprintf(buf, sizeof(buf), "%04u", year);
+        out.value = buf;
+      } else {
+        out.value = format_hex(field_ptr, field_len);
+      }
+      break;
+    }
+    case FT_DECIMAL: {
+      std::string formatted;
+      bool ok = format_decimal_value(field, field_ptr, field_len, formatted);
+      if (ok) {
+        out.is_numeric = true;
+        out.value = formatted;
+      } else {
+        out.value = format_hex(field_ptr, field_len);
+      }
+      break;
+    }
+    case FT_ENUM: {
+      uint64_t idx = read_be_uint(field_ptr, field_len);
+      std::string formatted;
+      bool ok = format_enum_value(field, idx, formatted);
+      if (ok) {
+        out.value = formatted;
+      } else {
+        out.is_numeric = true;
+        out.value = std::to_string(static_cast<unsigned long long>(idx));
+      }
+      break;
+    }
+    case FT_SET: {
+      if (field_len > 8) {
+        out.value = format_hex(field_ptr, field_len);
+        break;
+      }
+      uint64_t mask = read_be_uint(field_ptr, field_len);
+      std::string formatted;
+      bool ok = format_set_value(field, mask, formatted);
+      if (ok) {
+        out.value = formatted;
+      } else {
+        out.is_numeric = true;
+        out.value = std::to_string(static_cast<unsigned long long>(mask));
+      }
+      break;
+    }
+    case FT_BIT: {
+      if (field_len <= 8) {
+        uint64_t mask = read_be_uint(field_ptr, field_len);
+        out.is_numeric = true;
+        out.value = std::to_string(static_cast<unsigned long long>(mask));
+      } else {
+        out.value = format_hex(field_ptr, field_len);
+      }
       break;
     }
     default:

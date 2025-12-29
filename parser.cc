@@ -79,6 +79,8 @@ struct MyColumnDef {
     int         numeric_scale = 0;
     int         datetime_precision = 0;
     size_t      elements_count = 0;
+    std::vector<std::string> elements;
+    bool        elements_complete = false;
 };
 
 /** We store the columns here, loaded from JSON. */
@@ -324,7 +326,16 @@ void debug_print_table_def(const table_def_t *table)
         case FT_CHAR:       type_str = "FT_CHAR";     break;
         case FT_TEXT:       type_str = "FT_TEXT";     break;
         case FT_BLOB:       type_str = "FT_BLOB";     break;
+        case FT_BIN:        type_str = "FT_BIN";      break;
+        case FT_DATE:       type_str = "FT_DATE";     break;
+        case FT_TIME:       type_str = "FT_TIME";     break;
         case FT_DATETIME:   type_str = "FT_DATETIME"; break;
+        case FT_TIMESTAMP:  type_str = "FT_TIMESTAMP"; break;
+        case FT_YEAR:       type_str = "FT_YEAR";     break;
+        case FT_ENUM:       type_str = "FT_ENUM";     break;
+        case FT_SET:        type_str = "FT_SET";      break;
+        case FT_BIT:        type_str = "FT_BIT";      break;
+        case FT_DECIMAL:    type_str = "FT_DECIMAL";  break;
         case FT_FLOAT:      type_str = "FT_FLOAT";    break;
         case FT_DOUBLE:     type_str = "FT_DOUBLE";   break;
         // ... if you have more, add them
@@ -967,6 +978,30 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
             set_var(fld, max_len);
         }
 
+        if ((fld->type == FT_ENUM || fld->type == FT_SET) &&
+            col.elements_complete && !col.elements.empty()) {
+            fld->has_limits = true;
+            if (fld->type == FT_ENUM) {
+                size_t count = col.elements.size();
+                if (count > MAX_ENUM_VALUES) {
+                    count = MAX_ENUM_VALUES;
+                }
+                fld->limits.enum_values_count = static_cast<int>(count);
+                for (size_t j = 0; j < count; j++) {
+                    fld->limits.enum_values[j] = strdup(col.elements[j].c_str());
+                }
+            } else {
+                size_t count = col.elements.size();
+                if (count > MAX_SET_VALUES) {
+                    count = MAX_SET_VALUES;
+                }
+                fld->limits.set_values_count = static_cast<int>(count);
+                for (size_t j = 0; j < count; j++) {
+                    fld->limits.set_values[j] = strdup(col.elements[j].c_str());
+                }
+            }
+        }
+
         // (E) Possibly parse numeric precision, scale => decimal_digits, etc.
         // (F) Possibly parse "char_length" => do above or below.
 
@@ -1128,7 +1163,20 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
             def.datetime_precision = c["datetime_precision"].GetInt();
         }
         if (c.HasMember("elements") && c["elements"].IsArray()) {
-            def.elements_count = c["elements"].GetArray().Size();
+            const auto& elems = c["elements"].GetArray();
+            def.elements_count = elems.Size();
+            def.elements.resize(elems.Size());
+            def.elements_complete = true;
+            for (rapidjson::SizeType ei = 0; ei < elems.Size(); ++ei) {
+                const auto& el = elems[ei];
+                if (el.IsString()) {
+                    def.elements[ei] = el.GetString();
+                } else if (el.IsObject() && el.HasMember("name") && el["name"].IsString()) {
+                    def.elements[ei] = el["name"].GetString();
+                } else {
+                    def.elements_complete = false;
+                }
+            }
         }
 
         g_columns_by_opx[i] = def;
