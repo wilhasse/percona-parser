@@ -125,6 +125,48 @@ ${PARSER} 5 "$SCRIPT_DIR/compressed_test.ibd" "$TEMP_OUT" 2>&1 | grep -q "REBUIL
     log_fail "Mode 5 rebuild failed"
 rm -f "$TEMP_OUT"
 
+# Test 9: CSV output format
+echo "Test 9: CSV output format (--format=csv)"
+OUTPUT=$(${PARSER} 3 "$SCRIPT_DIR/compressed_test_rebuilt.ibd" "$SCRIPT_DIR/compressed_test_sdi.json" --format=csv 2>&1 | grep '^1,Product A,' | head -1)
+if [[ -n "$OUTPUT" ]]; then
+    log_pass "CSV format works (comma-separated)"
+    log_info "CSV line: $OUTPUT"
+else
+    log_fail "CSV format not working"
+fi
+
+# Test 10: JSONL output format
+echo "Test 10: JSONL output format (--format=jsonl)"
+OUTPUT=$(${PARSER} 3 "$SCRIPT_DIR/compressed_test_rebuilt.ibd" "$SCRIPT_DIR/compressed_test_sdi.json" --format=jsonl 2>&1 | grep '"id":1' | head -1)
+if [[ -n "$OUTPUT" ]]; then
+    log_pass "JSONL format works (JSON objects)"
+    log_info "JSONL line: $OUTPUT"
+else
+    log_fail "JSONL format not working"
+fi
+
+# Test 11: --with-meta adds page/record metadata
+echo "Test 11: Metadata output (--with-meta)"
+OUTPUT=$(${PARSER} 3 "$SCRIPT_DIR/compressed_test_rebuilt.ibd" "$SCRIPT_DIR/compressed_test_sdi.json" --format=jsonl --with-meta 2>&1 | grep '"page_no"' | head -1)
+if [[ -n "$OUTPUT" ]]; then
+    log_pass "--with-meta adds page_no/rec_offset"
+    log_info "Meta line: $OUTPUT"
+else
+    log_fail "--with-meta not adding metadata"
+fi
+
+# Test 12: Output to file (--output)
+echo "Test 12: Output to file (--output=PATH)"
+TEMP_OUT=$(mktemp)
+${PARSER} 3 "$SCRIPT_DIR/compressed_test_rebuilt.ibd" "$SCRIPT_DIR/compressed_test_sdi.json" --format=csv --output="$TEMP_OUT" >/dev/null 2>&1
+LINE_COUNT=$(wc -l < "$TEMP_OUT")
+if [[ "$LINE_COUNT" -eq 56 ]]; then  # 55 records + 1 header
+    log_pass "File output: $LINE_COUNT lines (55 records + header)"
+else
+    log_fail "File output incorrect: $LINE_COUNT lines"
+fi
+rm -f "$TEMP_OUT"
+
 echo ""
 echo "================================"
 echo "  Results: $TESTS_PASSED passed, $TESTS_FAILED failed"
