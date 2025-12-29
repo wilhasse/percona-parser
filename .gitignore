@@ -20,4 +20,4 @@ keyring_*
 
 # OS files
 .DS_Store
-Thumbs.db
+Thumbs.dbtests/logs/

@@ -17,7 +17,8 @@ DB_NAME="test_encryption"
 TABLE_NAME="test_encrypted"
 IMPORT_TABLE="test_normal_from_encrypted"
 MYSQL_DATA_DIR="/var/lib/mysql"  # Adjust if different
-PARSER_DIR="/home/cslog/percona-parser"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PARSER_DIR="$(dirname "$SCRIPT_DIR")"
 KEYRING_FILE="/var/lib/mysql-keyring/keyring"  # Default keyring location
 
 # Colors for output
@@ -26,27 +27,17 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${YELLOW}Step 1: Enabling encryption in Percona Server${NC}"
-# Check if encryption is already enabled
-ENCRYPTION_STATUS=$(mysql -u$DB_USER -sN -e "SELECT @@innodb_encrypt_tables;" 2>/dev/null || echo "OFF")
-
-if [ "$ENCRYPTION_STATUS" != "ON" ]; then
-    echo "Enabling table encryption..."
-    mysql -u$DB_USER <<EOF
-SET GLOBAL innodb_encrypt_tables = ON;
-SET GLOBAL innodb_encrypt_log = ON;
-SET GLOBAL innodb_redo_log_encrypt = ON;
-SET GLOBAL innodb_undo_log_encrypt = ON;
-EOF
+echo -e "${YELLOW}Step 1: Checking encryption availability${NC}"
+# Check if encryption is available by testing table creation
+mysql -u$DB_USER -e "CREATE DATABASE IF NOT EXISTS _encryption_test_tmp_;" 2>/dev/null
+if ! mysql -u$DB_USER -e "CREATE TABLE _encryption_test_tmp_.enc_check (id INT) ENCRYPTION='Y';" 2>/dev/null; then
+    echo -e "${YELLOW}SKIPPED: Encryption not available (keyring not configured)${NC}"
+    echo "To enable encryption, configure keyring component in Percona 8.0"
+    mysql -u$DB_USER -e "DROP DATABASE IF EXISTS _encryption_test_tmp_;" 2>/dev/null
+    exit 0
 fi
-
-# Ensure keyring plugin is loaded
-KEYRING_LOADED=$(mysql -u$DB_USER -sN -e "SELECT COUNT(*) FROM information_schema.PLUGINS WHERE PLUGIN_NAME='keyring_file';" 2>/dev/null || echo "0")
-
-if [ "$KEYRING_LOADED" -eq "0" ]; then
-    echo "Loading keyring_file plugin..."
-    mysql -u$DB_USER -e "INSTALL PLUGIN keyring_file SONAME 'keyring_file.so';"
-fi
+mysql -u$DB_USER -e "DROP DATABASE IF EXISTS _encryption_test_tmp_;" 2>/dev/null
+echo -e "${GREEN}Encryption is available${NC}"
 
 echo -e "${YELLOW}Step 2: Creating test database and encrypted table${NC}"
 mysql -u$DB_USER -e "DROP DATABASE IF EXISTS $DB_NAME;"

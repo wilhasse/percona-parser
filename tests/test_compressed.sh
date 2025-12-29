@@ -17,7 +17,8 @@ DB_NAME="test_compression"
 TABLE_NAME="test_compressed"
 IMPORT_TABLE="test_normal_from_compressed"
 MYSQL_DATA_DIR="/var/lib/mysql"  # Adjust if different
-PARSER_DIR="/home/cslog/percona-parser"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PARSER_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Colors for output
 RED='\033[0;31m'
@@ -36,8 +37,9 @@ mysql -u$DB_USER -e "DROP DATABASE IF EXISTS ${DB_NAME}_import;" 2>/dev/null || 
 # Then stop MySQL and clean up filesystem
 sudo systemctl stop mysql
 sleep 2
-sudo rm -rf "/var/lib/mysql/${DB_NAME}"* 
-sudo rm -rf "/var/lib/mysql/${DB_NAME}_import"*
+# Use explicit paths to ensure proper cleanup
+sudo rm -rf "/var/lib/mysql/${DB_NAME}"
+sudo rm -rf "/var/lib/mysql/${DB_NAME}_import"
 sudo systemctl start mysql
 sleep 3
 

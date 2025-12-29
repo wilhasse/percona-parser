@@ -4,6 +4,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PARSER_DIR="$(dirname "$SCRIPT_DIR")"
+
 echo "Testing import of decompressed file to show ROW_FORMAT error"
 echo "=============================================================="
 
@@ -44,11 +47,11 @@ else
     # First check if we already have a compressed file from previous test
     if [ -f "tests/ibd_files/test_compressed_compressed.ibd" ]; then
         echo "Found compressed file, decompressing it..."
-        cd /home/cslog/percona-parser
+        cd "$PARSER_DIR"
         ./build/ib_parser 2 tests/ibd_files/test_compressed_compressed.ibd tests/ibd_files/test_compressed_decompressed.ibd
     else
         echo "Running full test to create compressed file..."
-        cd /home/cslog/percona-parser
+        cd "$PARSER_DIR"
         ./tests/test_compressed.sh
     fi
     sudo cp tests/ibd_files/test_compressed_decompressed.ibd /var/lib/mysql/test_rowformat/test_table.ibd  
