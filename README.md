@@ -11,6 +11,7 @@ InnoDB single-table tablespaces (.ibd) for recovery and research.
 - Decode LOB/ZLOB, JSON binary columns, charset-aware text, and DATETIME.
 - Experimental rebuild to 16KB pages with SDI rebuild (in-page or external).
 - Generate .cfg from SDI for IMPORT TABLESPACE (instant/row-version tables).
+- Remap index IDs during rebuild for imports into different target tables.
 - C API for integrations (see `lib/`).
 
 ## Quick Start
@@ -33,6 +34,10 @@ Decompress or rebuild:
 ```bash
 ./build/ib_parser 2 compressed.ibd decompressed.ibd
 ./build/ib_parser 5 compressed.ibd rebuilt.ibd --sdi-json=table_sdi.json --cfg-out=table.cfg
+./build/ib_parser 5 source.ibd rebuilt.ibd --sdi-json=source_sdi.json \\
+  --target-sdi-json=target_sdi.json --cfg-out=target.cfg
+./build/ib_parser 5 source.ibd rebuilt.ibd --sdi-json=source_sdi.json \\
+  --target-sdi-json=target_sdi.json --index-id-map=index_id.map --cfg-out=target.cfg
 ```
 
 ## Limitations
@@ -42,6 +47,7 @@ Decompress or rebuild:
 - MySQL 8+ format; older layouts are not supported.
 - Parses one index at a time; default PRIMARY (use `--index` for secondary).
 - .cfg generation requires SDI JSON; import without .cfg may fail on instant tables.
+- Importing into a different table requires index-id remap via `--target-sdi-json`.
 
 ## Docs and Tests
 

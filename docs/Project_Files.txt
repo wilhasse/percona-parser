@@ -16,6 +16,7 @@ Purpose: Declarations for page decompression functionality
 Key Functions:
   - decompress_page_inplace(): Decompress or copy one page in memory
   - decompress_ibd(): Main function to read compressed .ibd files and write uncompressed
+  - rebuild_uncompressed_ibd(): Rebuild to 16KB, rebuild SDI, and remap index IDs
   - determine_page_size(): Determine page size from file
   - is_page_compressed(): Check if a page is compressed
 
@@ -92,6 +93,7 @@ Key Features:
   - Supports InnoDB compression formats
   - Contains stubs for InnoDB logger (ib::logger, ib::warn, etc.)
   - Implements page-by-page decompression
+  - Experimental rebuild to 16KB with SDI rebuild and index-id remap
   - Uses MySQL's page_zip_decompress_low() for actual decompression
 
 2. decrypt.cc

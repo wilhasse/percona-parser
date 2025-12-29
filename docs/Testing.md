@@ -36,7 +36,7 @@ Run with JSON output:
 
 ## Test Suite Overview
 
-The test suite (`tests/run_all_tests.sh`) runs 12 comprehensive tests:
+The test suite (`tests/run_all_tests.sh`) runs 13 comprehensive tests:
 
 | # | Test Name | Script | Description |
 |---|-----------|--------|-------------|
@@ -52,6 +52,7 @@ The test suite (`tests/run_all_tests.sh`) runs 12 comprehensive tests:
 | 10 | SDI_REBUILD | `test_sdi_rebuild.sh` | Mode 5 full rebuild with SDI for MySQL import |
 | 11 | SDI_EXTERNAL | `test_sdi_external.sh` | SDI rebuild with external SDI BLOB pages |
 | 12 | CFG_IMPORT | `test_cfg_import.sh` | Generate .cfg from SDI for instant-column import |
+| 13 | INDEX_ID_REMAP | `test_index_id_remap.sh` | Remap index IDs for import into target table |
 
 ## Individual Test Details
 
@@ -176,6 +177,15 @@ Validates `.cfg` generation with instant columns and `IMPORT TABLESPACE`.
 - Generate `.cfg` via `--cfg-out`
 - Import into an instant-column table
 
+### 13. Index-ID Remap (`test_index_id_remap.sh`)
+
+Validates index-id remapping when importing into a different table.
+
+**What it tests**:
+- Extract SDI from source and target tables
+- Rebuild with `--target-sdi-json` to remap index IDs
+- Import rebuilt tablespace into the target table
+
 ## Test Output
 
 ### Normal Mode
@@ -194,8 +204,8 @@ Running: ENCRYPTED_TABLES
 ==========================================
 TEST SUITE SUMMARY
 ==========================================
-Total tests run: 12
-Passed: 12
+Total tests run: 13
+Passed: 13
 Failed: 0
 Duration: 180s
 

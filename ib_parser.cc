@@ -183,7 +183,8 @@ static void usage() {
             << "  ib_parser 3 <in_file.ibd> <table_def.json> [--index=NAME|ID] [--list-indexes]\n"
             << "    [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n"
             << "  ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
-            << "  ib_parser 5 <in_file.ibd> <out_file>\n"
+            << "  ib_parser 5 <in_file.ibd> <out_file> [--sdi-json=PATH]\n"
+            << "    [--target-sdi-json=PATH] [--index-id-map=PATH] [--cfg-out=PATH]\n"
             << std::endl;
 }
 
@@ -298,7 +299,8 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
 {
   if (argc < 3) {
     std::cerr << "Usage for mode=5 (rebuild-uncompressed):\n"
-              << "  ib_parser 5 <in_file> <out_file> [--sdi-json=PATH] [--cfg-out=PATH]\n";
+              << "  ib_parser 5 <in_file> <out_file> [--sdi-json=PATH]\n"
+              << "    [--target-sdi-json=PATH] [--index-id-map=PATH] [--cfg-out=PATH]\n";
     return 1;
   }
 
@@ -308,17 +310,35 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
 
   const char* in_file  = argv[1];
   const char* out_file = argv[2];
-  const char* sdi_json = nullptr;
+  const char* source_sdi_json = nullptr;
+  const char* target_sdi_json = nullptr;
+  const char* index_id_map = nullptr;
   const char* cfg_out = nullptr;
 
   for (int i = 3; i < argc; ++i) {
     const char* arg = argv[i];
     if (strncmp(arg, "--sdi-json=", 11) == 0) {
-      sdi_json = arg + 11;
+      source_sdi_json = arg + 11;
       continue;
     }
     if (strcmp(arg, "--sdi-json") == 0 && i + 1 < argc) {
-      sdi_json = argv[++i];
+      source_sdi_json = argv[++i];
+      continue;
+    }
+    if (strncmp(arg, "--target-sdi-json=", 18) == 0) {
+      target_sdi_json = arg + 18;
+      continue;
+    }
+    if (strcmp(arg, "--target-sdi-json") == 0 && i + 1 < argc) {
+      target_sdi_json = argv[++i];
+      continue;
+    }
+    if (strncmp(arg, "--index-id-map=", 15) == 0) {
+      index_id_map = arg + 15;
+      continue;
+    }
+    if (strcmp(arg, "--index-id-map") == 0 && i + 1 < argc) {
+      index_id_map = argv[++i];
       continue;
     }
     if (strncmp(arg, "--cfg-out=", 10) == 0) {
@@ -330,6 +350,17 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
       continue;
     }
     std::cerr << "Unknown option: " << arg << "\n";
+    return 1;
+  }
+
+  if (target_sdi_json != nullptr && source_sdi_json == nullptr) {
+    std::cerr << "Error: --target-sdi-json requires --sdi-json (source).\n";
+    return 1;
+  }
+
+  if (cfg_out != nullptr &&
+      (target_sdi_json == nullptr && source_sdi_json == nullptr)) {
+    std::cerr << "Error: --cfg-out requires --sdi-json or --target-sdi-json.\n";
     return 1;
   }
 
@@ -345,7 +376,8 @@ static int do_rebuild_uncompressed_main(int argc, char** argv)
     return 1;
   }
 
-  bool ok = rebuild_uncompressed_ibd(in_fd, out_fd, sdi_json, cfg_out);
+  bool ok = rebuild_uncompressed_ibd(in_fd, out_fd, source_sdi_json,
+                                     target_sdi_json, index_id_map, cfg_out);
   my_close(in_fd, MYF(0));
   my_close(out_fd, MYF(0));
   return ok ? 0 : 1;

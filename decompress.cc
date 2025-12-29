@@ -688,6 +688,181 @@ static bool parse_uint32_value(const std::string& s, uint32_t* out) {
   return true;
 }
 
+static std::string to_lower_copy(const std::string& input) {
+  std::string out = input;
+  std::transform(out.begin(), out.end(), out.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return out;
+}
+
+static bool extract_index_ids_by_name(
+    const SdiMetadata& meta,
+    std::unordered_map<std::string, uint64_t>* out,
+    std::string* err) {
+  if (out == nullptr) {
+    if (err) {
+      *err = "index-id output map is null";
+    }
+    return false;
+  }
+  out->clear();
+
+  if (!meta.has_table) {
+    if (err) {
+      *err = "SDI metadata missing table object";
+    }
+    return false;
+  }
+
+  for (const auto& idx : meta.table.indexes) {
+    if (idx.name.empty()) {
+      continue;
+    }
+    const auto kv = parse_kv_string(idx.se_private_data);
+    auto id_it = kv.find(dd_index_key_strings[DD_INDEX_ID]);
+    if (id_it == kv.end()) {
+      continue;
+    }
+    uint64_t id = 0;
+    if (!parse_uint64_value(id_it->second, &id)) {
+      continue;
+    }
+    (*out)[to_lower_copy(idx.name)] = id;
+  }
+
+  if (out->empty()) {
+    if (err) {
+      *err = "no index ids found in SDI metadata";
+    }
+    return false;
+  }
+  return true;
+}
+
+static bool build_index_id_remap_from_sdi(
+    const SdiMetadata& source,
+    const SdiMetadata& target,
+    std::unordered_map<uint64_t, uint64_t>* out,
+    std::string* err) {
+  if (out == nullptr) {
+    if (err) {
+      *err = "index-id remap output is null";
+    }
+    return false;
+  }
+
+  std::unordered_map<std::string, uint64_t> src_by_name;
+  std::unordered_map<std::string, uint64_t> tgt_by_name;
+  std::string src_err;
+  std::string tgt_err;
+  if (!extract_index_ids_by_name(source, &src_by_name, &src_err)) {
+    if (err) {
+      *err = "source SDI: " + src_err;
+    }
+    return false;
+  }
+  if (!extract_index_ids_by_name(target, &tgt_by_name, &tgt_err)) {
+    if (err) {
+      *err = "target SDI: " + tgt_err;
+    }
+    return false;
+  }
+
+  out->clear();
+  for (const auto& entry : src_by_name) {
+    auto it = tgt_by_name.find(entry.first);
+    if (it == tgt_by_name.end()) {
+      continue;
+    }
+    if (entry.second != 0 && it->second != 0) {
+      (*out)[entry.second] = it->second;
+    }
+  }
+
+  if (out->empty()) {
+    if (err) {
+      *err = "no matching index ids between source and target SDI";
+    }
+    return false;
+  }
+  return true;
+}
+
+static bool load_index_id_map_file(
+    const char* path,
+    std::unordered_map<uint64_t, uint64_t>* out,
+    std::string* err) {
+  if (out == nullptr) {
+    if (err) {
+      *err = "index-id map output is null";
+    }
+    return false;
+  }
+
+  std::ifstream ifs(path);
+  if (!ifs.is_open()) {
+    if (err) {
+      *err = "cannot open index-id map file";
+    }
+    return false;
+  }
+
+  std::string line;
+  size_t line_no = 0;
+  while (std::getline(ifs, line)) {
+    line_no++;
+    auto hash = line.find('#');
+    if (hash != std::string::npos) {
+      line.resize(hash);
+    }
+    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    line.erase(line.begin(),
+               std::find_if(line.begin(), line.end(),
+                            [&](unsigned char ch) { return !is_space(ch); }));
+    while (!line.empty() && is_space(static_cast<unsigned char>(line.back()))) {
+      line.pop_back();
+    }
+    if (line.empty()) {
+      continue;
+    }
+
+    std::string left;
+    std::string right;
+    auto eq = line.find('=');
+    if (eq != std::string::npos) {
+      left = line.substr(0, eq);
+      right = line.substr(eq + 1);
+    } else {
+      std::istringstream iss(line);
+      iss >> left >> right;
+    }
+    if (left.empty() || right.empty()) {
+      if (err) {
+        *err = "invalid mapping at line " + std::to_string(line_no);
+      }
+      return false;
+    }
+
+    uint64_t src = 0;
+    uint64_t dst = 0;
+    if (!parse_uint64_value(left, &src) || !parse_uint64_value(right, &dst)) {
+      if (err) {
+        *err = "invalid mapping at line " + std::to_string(line_no);
+      }
+      return false;
+    }
+    (*out)[src] = dst;
+  }
+
+  if (out->empty()) {
+    if (err) {
+      *err = "index-id map file is empty";
+    }
+    return false;
+  }
+  return true;
+}
+
 static bool load_sdi_metadata(const char* json_path, SdiMetadata* meta) {
   if (meta == nullptr) {
     return false;
@@ -2904,7 +3079,10 @@ bool decompress_ibd(File in_fd, File out_fd)
 // ----------------------------------------------------------------
 // Experimental: rebuild compressed tablespace into 16KB pages
 // ----------------------------------------------------------------
-bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path,
+bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
+                              const char* source_sdi_json_path,
+                              const char* target_sdi_json_path,
+                              const char* index_id_map_path,
                               const char* cfg_out_path)
 {
   MY_STAT stat_info;
@@ -2945,19 +3123,44 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
   std::unique_ptr<unsigned char[]> in_buf(new unsigned char[physical_size]);
   std::unique_ptr<unsigned char[]> out_buf(new unsigned char[logical_size]);
 
+  const char* output_sdi_json_path =
+      (target_sdi_json_path != nullptr) ? target_sdi_json_path
+                                        : source_sdi_json_path;
+  const bool have_output_sdi_json = (output_sdi_json_path != nullptr);
+  const bool have_source_sdi_json = (source_sdi_json_path != nullptr);
+  const bool have_target_sdi_json = (target_sdi_json_path != nullptr);
+
   std::vector<SdiEntry> sdi_entries;
   std::vector<page_no_t> sdi_blob_pages;
   std::unordered_map<page_no_t, std::vector<byte>> sdi_blob_output;
-  bool have_sdi_json = (sdi_json_path != nullptr);
+  std::unordered_map<uint64_t, uint64_t> index_id_remap;
   bool want_cfg = (cfg_out_path != nullptr);
   page_no_t sdi_root_page = FIL_NULL;
   bool sdi_root_set = false;
   uint32_t space_flags = 0;
   bool space_flags_set = false;
   SdiMetadata sdi_meta;
+  SdiMetadata source_meta;
+  SdiMetadata target_meta;
+  bool have_source_meta = false;
+  bool have_target_meta = false;
 
-  if (have_sdi_json) {
-    if (!load_sdi_json_entries(sdi_json_path, sdi_entries)) {
+  if (have_source_sdi_json) {
+    if (!load_sdi_metadata(source_sdi_json_path, &source_meta)) {
+      return false;
+    }
+    have_source_meta = true;
+  }
+
+  if (have_target_sdi_json) {
+    if (!load_sdi_metadata(target_sdi_json_path, &target_meta)) {
+      return false;
+    }
+    have_target_meta = true;
+  }
+
+  if (have_output_sdi_json) {
+    if (!load_sdi_json_entries(output_sdi_json_path, sdi_entries)) {
       return false;
     }
     if (!collect_sdi_blob_pages(in_fd, pg_sz, num_pages, &sdi_blob_pages)) {
@@ -2965,14 +3168,50 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
     }
   }
 
-  if (want_cfg) {
-    if (!have_sdi_json) {
-      fprintf(stderr, "Error: --cfg-out requires --sdi-json.\n");
+  if (have_target_meta) {
+    sdi_meta = target_meta;
+  } else if (have_source_meta) {
+    sdi_meta = source_meta;
+  }
+
+  if (have_source_meta && have_target_meta) {
+    std::string err;
+    if (!build_index_id_remap_from_sdi(source_meta, target_meta,
+                                       &index_id_remap, &err)) {
+      fprintf(stderr, "Error: failed to build index-id remap: %s\n",
+              err.c_str());
       return false;
     }
-    if (!load_sdi_metadata(sdi_json_path, &sdi_meta)) {
+  }
+
+  if (index_id_map_path != nullptr) {
+    std::string err;
+    std::unordered_map<uint64_t, uint64_t> file_map;
+    if (!load_index_id_map_file(index_id_map_path, &file_map, &err)) {
+      fprintf(stderr, "Error: failed to load index-id map: %s\n",
+              err.c_str());
       return false;
     }
+    for (const auto& entry : file_map) {
+      auto it = index_id_remap.find(entry.first);
+      if (it != index_id_remap.end() && it->second != entry.second) {
+        fprintf(stderr,
+                "Warning: index-id map override for %llu (%llu -> %llu)\n",
+                static_cast<unsigned long long>(entry.first),
+                static_cast<unsigned long long>(it->second),
+                static_cast<unsigned long long>(entry.second));
+      }
+      index_id_remap[entry.first] = entry.second;
+    }
+  }
+
+  if (want_cfg && !have_output_sdi_json) {
+    fprintf(stderr, "Error: --cfg-out requires SDI JSON metadata.\n");
+    return false;
+  }
+
+  if (!index_id_remap.empty()) {
+    fprintf(stderr, "Index-id remap entries: %zu\n", index_id_remap.size());
   }
 
   space_id_t space_id = SPACE_UNKNOWN;
@@ -3008,7 +3247,7 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
     }
 
     if (page_no == 0) {
-      if (have_sdi_json) {
+      if (have_output_sdi_json) {
         const uint32_t old_flags = fsp_header_get_flags(in_buf.get());
         if (!FSP_FLAGS_HAS_SDI(old_flags)) {
           fprintf(stderr,
@@ -3023,7 +3262,8 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
         sdi_root_set = (sdi_root_page != 0 && sdi_root_page != FIL_NULL);
         fprintf(stderr,
                 "SDI header: version=%u root_page=%u (json=%s)\n",
-                sdi_version, sdi_root_page, sdi_json_path);
+                sdi_version, sdi_root_page,
+                output_sdi_json_path ? output_sdi_json_path : "(none)");
       }
 
       if (!update_tablespace_header_for_uncompressed(out_buf.get(),
@@ -3034,7 +3274,7 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
       space_flags = fsp_header_get_flags(out_buf.get());
       space_flags_set = true;
 
-      if (have_sdi_json) {
+      if (have_output_sdi_json) {
         if (!sdi_root_set || sdi_root_page >= num_pages) {
           fprintf(stderr,
                   "Error: invalid SDI root page (%u) for %llu pages\n",
@@ -3054,7 +3294,7 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
       return false;
     }
 
-    if (have_sdi_json && sdi_root_set && page_no == sdi_root_page) {
+    if (have_output_sdi_json && sdi_root_set && page_no == sdi_root_page) {
       byte fseg_leaf[FSEG_HEADER_SIZE];
       byte fseg_top[FSEG_HEADER_SIZE];
       memcpy(fseg_leaf,
@@ -3086,6 +3326,20 @@ bool rebuild_uncompressed_ibd(File in_fd, File out_fd, const char* sdi_json_path
                                   blob_alloc_ptr)) {
         fprintf(stderr, "Error: SDI root page rebuild failed.\n");
         return false;
+      }
+    }
+
+    if (!index_id_remap.empty()) {
+      const uint16_t page_type =
+          mach_read_from_2(out_buf.get() + FIL_PAGE_TYPE);
+      if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_RTREE) {
+        const uint64_t old_id =
+            mach_read_from_8(out_buf.get() + PAGE_HEADER + PAGE_INDEX_ID);
+        auto it = index_id_remap.find(old_id);
+        if (it != index_id_remap.end()) {
+          mach_write_to_8(out_buf.get() + PAGE_HEADER + PAGE_INDEX_ID,
+                          it->second);
+        }
       }
     }
 

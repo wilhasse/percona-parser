@@ -34,11 +34,15 @@ bool decompress_ibd(File in_fd, File out_fd);
  *   Experimental converter: reads a compressed tablespace (physical < logical),
  *   expands all pages to logical size, clears ZIP_SSIZE in FSP flags, updates
  *   space_id fields, and writes CRC32 checksums for 16KB pages.
- *   If sdi_json_path is provided, rebuilds the SDI root page from JSON.
+ *   If source_sdi_json_path is provided, it is used for index-id mapping.
+ *   If target_sdi_json_path is provided, SDI output/.cfg metadata is rebuilt from it.
+ *   If index_id_map_path is provided, it is merged into the remap table.
  *   If cfg_out_path is provided, writes a .cfg file from SDI metadata.
  */
 bool rebuild_uncompressed_ibd(File in_fd, File out_fd,
-                              const char* sdi_json_path,
+                              const char* source_sdi_json_path,
+                              const char* target_sdi_json_path,
+                              const char* index_id_map_path,
                               const char* cfg_out_path);
 
 bool determine_page_size(File file_in, page_size_t &page_sz);

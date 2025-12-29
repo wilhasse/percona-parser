@@ -140,6 +140,7 @@ if [ "$JSON_OUTPUT" != "true" ] || [ "$VERBOSE" = "true" ]; then
     echo "10. SDI rebuild (Mode 5 with --sdi-json)"
     echo "11. SDI external rebuild (external SDI BLOB pages)"
     echo "12. CFG import (instant columns via --cfg-out)"
+    echo "13. Index-id remap import (target SDI)"
     echo ""
     if [ "$VERBOSE" = "true" ]; then
         echo -e "${CYAN}Verbose mode enabled - showing real-time output${NC}"
@@ -305,6 +306,15 @@ fi
 # Test 12: CFG import (instant columns via --cfg-out)
 TOTAL_TESTS=$((TOTAL_TESTS + 1))
 if run_test "CFG_IMPORT" "$SCRIPT_DIR/test_cfg_import.sh"; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+[ "$JSON_OUTPUT" != "true" ] && echo ""
+
+# Test 13: Index-id remap import (target SDI)
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+if run_test "INDEX_ID_REMAP" "$SCRIPT_DIR/test_index_id_remap.sh"; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
     FAILED_TESTS=$((FAILED_TESTS + 1))

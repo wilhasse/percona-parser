@@ -84,6 +84,25 @@ Command:
 ./build/ib_parser 5 compressed.ibd rebuilt.ibd --sdi-json=mytable_sdi.json
 ```
 
+For imports into a *different* table (index IDs differ), remap using target SDI:
+
+```bash
+./build/ib_parser 5 source.ibd rebuilt.ibd \
+  --sdi-json=source_sdi.json \
+  --target-sdi-json=target_sdi.json \
+  --cfg-out=rebuilt.cfg
+```
+
+Optional: provide an explicit index-id mapping file (one `old=new` per line):
+
+```bash
+./build/ib_parser 5 source.ibd rebuilt.ibd \
+  --sdi-json=source_sdi.json \
+  --target-sdi-json=target_sdi.json \
+  --index-id-map=index_id.map \
+  --cfg-out=rebuilt.cfg
+```
+
 Import steps (example):
 
 ```bash
@@ -120,12 +139,15 @@ mysql -uroot test_import -e "ALTER TABLE mytable IMPORT TABLESPACE;"
    * Rebuild emits SDI BLOB pages when the SDI record does not fit in-page.
 7. **Secondary indexes are supported**
    * Use `--index=NAME|ID` to parse a secondary index; default is PRIMARY.
+8. **Index IDs must match the target table**
+   * When importing into a different table, use `--target-sdi-json` to remap index IDs.
 
 # Current Capabilities Summary
 
 * Decrypt, decompress, and parse clustered index leaf rows.
 * Decode LOB/ZLOB, JSON binary, charset-aware text, DATETIME.
 * Rebuild compressed tablespaces to 16KB with SDI restored (in-page or external).
+* Remap index IDs during rebuild using target SDI for cross-table imports.
 * Parse PRIMARY or secondary index leaf records via `--index`.
 
 # Open Work / Next Steps
@@ -138,5 +160,6 @@ mysql -uroot test_import -e "ALTER TABLE mytable IMPORT TABLESPACE;"
 
 * `tests/test_sdi_rebuild.sh` (end-to-end rebuild + import)
 * `tests/test_sdi_external.sh` (external SDI BLOB rebuild)
+* `tests/test_index_id_remap.sh` (target SDI remap + import)
 * `tests/test_types_decode.sh`, `test_charset_decode.sh`, `test_json_decode.sh`
 * `docs/Architecture.md`, `docs/Testing.md`
