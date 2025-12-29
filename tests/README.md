@@ -11,6 +11,7 @@ This directory contains test scripts for validating the ib_parser tool's functio
 | `test_encrypted.sh` | ✅ **Working** | Tests encrypted table decryption | Percona Server 8.0+ with encryption |
 | `test_encrypted_compressed.sh` | ⚠️ **Partial** | Tests combined encryption + compression | Percona Server 8.0+ |
 | `test_types_decode.sh` | ✅ **Working** | Generates fixture and validates type decoding | MySQL 8.0+ + ibd2sdi |
+| `test_lob_decode.sh` | ✅ **Working** | Validates external LOB (TEXT/BLOB) reconstruction | MySQL 8.0+ + ibd2sdi |
 | `run_all_tests.sh` | ✅ **Working** | Runs all test scripts sequentially | All of the above |
 
 ### Status Legend:
@@ -131,6 +132,22 @@ Executes all test scenarios and reports results.
 **How to run:**
 ```bash
 ./test_types_decode.sh
+```
+
+**Notes:**
+- Requires `python3` for JSON normalization during compare
+
+---
+
+### `test_lob_decode.sh`
+**What it does:**
+- Creates a table with LONGTEXT and LONGBLOB stored externally
+- Exports fixture files to `tests/lob_test.ibd` and `tests/lob_test_sdi.json`
+- Parses with `ib_parser --lob-max-bytes` and compares JSONL output to MySQL
+
+**How to run:**
+```bash
+./test_lob_decode.sh
 ```
 
 **Notes:**

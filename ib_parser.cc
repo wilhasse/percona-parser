@@ -131,7 +131,7 @@ static void usage() {
             << "Examples:\n"
             << "  ib_parser 1 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 2 <in_file.ibd> <out_file>\n"
-            << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta]\n"
+            << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n"
             << "  ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 5 <in_file.ibd> <out_file>\n"
             << std::endl;
@@ -285,7 +285,7 @@ static int do_parse_main(int argc, char** argv)
 {
   if (argc < 3) {
     std::cerr << "Usage for mode=3 (parse-only):\n"
-              << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta]\n";
+              << "  ib_parser 3 <in_file.ibd> <table_def.json> [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n";
     return 1;
   }
 
@@ -345,6 +345,20 @@ static int do_parse_main(int argc, char** argv)
         return 1;
       }
       out_path = argv[++i];
+      continue;
+    }
+    if (arg.rfind("--lob-max-bytes=", 0) == 0) {
+      const char* value = argv[i] + std::strlen("--lob-max-bytes=");
+      output_opts.lob_max_bytes = static_cast<size_t>(std::strtoull(value, nullptr, 10));
+      continue;
+    }
+    if (arg == "--lob-max-bytes") {
+      if (i + 1 >= argc) {
+        std::cerr << "--lob-max-bytes requires a value\n";
+        return 1;
+      }
+      output_opts.lob_max_bytes =
+          static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
       continue;
     }
     std::cerr << "Unknown argument: " << arg << "\n";
@@ -411,6 +425,13 @@ static int do_parse_main(int argc, char** argv)
   const size_t physical_page_size = pg_sz.physical();
   const size_t logical_page_size = pg_sz.logical();
   const bool tablespace_compressed = (physical_page_size < logical_page_size);
+
+  LobReadContext lob_ctx;
+  lob_ctx.fd = sys_fd;
+  lob_ctx.physical_page_size = physical_page_size;
+  lob_ctx.logical_page_size = logical_page_size;
+  lob_ctx.tablespace_compressed = tablespace_compressed;
+  set_lob_read_context(lob_ctx);
 
   // 5) Rewind
   if (my_seek(in_fd, 0, MY_SEEK_SET, MYF(0)) == MY_FILEPOS_ERROR) {

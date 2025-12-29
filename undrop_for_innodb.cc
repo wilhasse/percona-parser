@@ -15,8 +15,14 @@
 #include <cctype>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <unistd.h>
 
 // MySQL includes
+#include "fil0fil.h"
+#include "fil0types.h"
+#include "btr0types.h"
+#include "lob0lob.h"
 #include "tables_dict.h"
 #include "univ.i"
 #include "page0page.h"
@@ -271,10 +277,15 @@ bool check_for_a_record(page_t *page, rec_t *rec, table_def_t *table, ulint *off
 // global so we can print header once
 static bool g_printed_header = false;
 static RowOutputOptions g_row_output;
+static LobReadContext g_lob_ctx;
 
 void set_row_output_options(const RowOutputOptions& opts) {
   g_row_output = opts;
   g_printed_header = false;
+}
+
+void set_lob_read_context(const LobReadContext& ctx) {
+  g_lob_ctx = ctx;
 }
 
 static FILE* output_stream() {
@@ -301,6 +312,241 @@ static int64_t read_be_int_signed(const unsigned char* ptr, size_t len) {
     val |= mask;
   }
   return static_cast<int64_t>(val);
+}
+
+constexpr ulint LOB_FLST_BASE_NODE_SIZE = 4 + 2 * FIL_ADDR_SIZE;
+
+constexpr ulint LOB_FIRST_OFFSET_VERSION = FIL_PAGE_DATA;
+constexpr ulint LOB_FIRST_OFFSET_FLAGS = LOB_FIRST_OFFSET_VERSION + 1;
+constexpr ulint LOB_FIRST_OFFSET_LOB_VERSION = LOB_FIRST_OFFSET_FLAGS + 1;
+constexpr ulint LOB_FIRST_OFFSET_LAST_TRX_ID = LOB_FIRST_OFFSET_LOB_VERSION + 4;
+constexpr ulint LOB_FIRST_OFFSET_LAST_UNDO_NO = LOB_FIRST_OFFSET_LAST_TRX_ID + 6;
+constexpr ulint LOB_FIRST_OFFSET_DATA_LEN = LOB_FIRST_OFFSET_LAST_UNDO_NO + 4;
+constexpr ulint LOB_FIRST_OFFSET_TRX_ID = LOB_FIRST_OFFSET_DATA_LEN + 4;
+constexpr ulint LOB_FIRST_OFFSET_INDEX_LIST = LOB_FIRST_OFFSET_TRX_ID + 6;
+constexpr ulint LOB_FIRST_OFFSET_INDEX_FREE_NODES =
+    LOB_FIRST_OFFSET_INDEX_LIST + LOB_FLST_BASE_NODE_SIZE;
+constexpr ulint LOB_FIRST_DATA = LOB_FIRST_OFFSET_INDEX_FREE_NODES + LOB_FLST_BASE_NODE_SIZE;
+
+constexpr ulint LOB_DATA_OFFSET_VERSION = FIL_PAGE_DATA;
+constexpr ulint LOB_DATA_OFFSET_DATA_LEN = LOB_DATA_OFFSET_VERSION + 1;
+constexpr ulint LOB_DATA_OFFSET_TRX_ID = LOB_DATA_OFFSET_DATA_LEN + 4;
+constexpr ulint LOB_DATA_DATA = LOB_DATA_OFFSET_TRX_ID + 6;
+
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_PREV = 0;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_NEXT = FIL_ADDR_SIZE;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_VERSIONS =
+    LOB_INDEX_ENTRY_OFFSET_NEXT + FIL_ADDR_SIZE;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_TRXID =
+    LOB_INDEX_ENTRY_OFFSET_VERSIONS + LOB_FLST_BASE_NODE_SIZE;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_TRXID_MODIFIER =
+    LOB_INDEX_ENTRY_OFFSET_TRXID + 6;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO =
+    LOB_INDEX_ENTRY_OFFSET_TRXID_MODIFIER + 6;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO_MODIFIER =
+    LOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO + 4;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_PAGE_NO =
+    LOB_INDEX_ENTRY_OFFSET_TRX_UNDO_NO_MODIFIER + 4;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_DATA_LEN =
+    LOB_INDEX_ENTRY_OFFSET_PAGE_NO + 4;
+constexpr ulint LOB_INDEX_ENTRY_OFFSET_LOB_VERSION =
+    LOB_INDEX_ENTRY_OFFSET_DATA_LEN + 4;
+constexpr ulint LOB_INDEX_ENTRY_SIZE =
+    LOB_INDEX_ENTRY_OFFSET_LOB_VERSION + 4;
+constexpr ulint LOB_FIRST_INDEX_COUNT = 10;
+constexpr ulint LOB_FIRST_INDEX_ARRAY_SIZE =
+    LOB_FIRST_INDEX_COUNT * LOB_INDEX_ENTRY_SIZE;
+constexpr ulint LOB_FIRST_DATA_BEGIN = LOB_FIRST_DATA + LOB_FIRST_INDEX_ARRAY_SIZE;
+
+struct LobRef {
+  space_id_t space_id = 0;
+  page_no_t page_no = FIL_NULL;
+  uint32_t offset = 0;
+  uint32_t version = 0;
+  uint32_t length = 0;
+  bool being_modified = false;
+};
+
+static fil_addr_t read_fil_addr(const unsigned char* ptr) {
+  fil_addr_t addr;
+  addr.page = mach_read_from_4(ptr + FIL_ADDR_PAGE);
+  addr.boffset = mach_read_from_2(ptr + FIL_ADDR_BYTE);
+  return addr;
+}
+
+static bool read_tablespace_page(page_no_t page_no,
+                                 std::vector<unsigned char>& buf) {
+  if (g_lob_ctx.fd < 0 || g_lob_ctx.physical_page_size == 0) {
+    return false;
+  }
+  const off_t offset =
+      static_cast<off_t>(page_no) * static_cast<off_t>(g_lob_ctx.physical_page_size);
+  const ssize_t rd = pread(g_lob_ctx.fd, buf.data(),
+                           g_lob_ctx.physical_page_size, offset);
+  return rd == static_cast<ssize_t>(g_lob_ctx.physical_page_size);
+}
+
+static size_t clamp_page_copy(size_t page_size, size_t start, size_t want) {
+  if (start >= page_size) {
+    return 0;
+  }
+  size_t avail = page_size - start;
+  return want < avail ? want : avail;
+}
+
+static size_t read_lob_old_chain(const LobRef& ref,
+                                 size_t want,
+                                 std::string& out) {
+  if (want == 0 || ref.page_no == FIL_NULL) {
+    return 0;
+  }
+  std::vector<unsigned char> page_buf(g_lob_ctx.physical_page_size);
+  page_no_t page_no = ref.page_no;
+  ulint offset = ref.offset;
+  size_t remaining = want;
+  size_t total = 0;
+  size_t steps = 0;
+  const size_t max_steps = 100000;
+
+  if (offset < FIL_PAGE_DATA || offset >= g_lob_ctx.physical_page_size) {
+    offset = FIL_PAGE_DATA;
+  }
+
+  while (page_no != FIL_NULL && remaining > 0 && steps++ < max_steps) {
+    if (!read_tablespace_page(page_no, page_buf)) {
+      break;
+    }
+    const uint16_t page_type = mach_read_from_2(page_buf.data() + FIL_PAGE_TYPE);
+    if (page_type != FIL_PAGE_TYPE_BLOB &&
+        page_type != FIL_PAGE_SDI_BLOB) {
+      break;
+    }
+    if (offset + lob::LOB_HDR_SIZE > g_lob_ctx.physical_page_size) {
+      break;
+    }
+    const unsigned char* header = page_buf.data() + offset;
+    ulint part_len = mach_read_from_4(header + lob::LOB_HDR_PART_LEN);
+    page_no_t next_page = mach_read_from_4(header + lob::LOB_HDR_NEXT_PAGE_NO);
+
+    size_t copy_len = part_len;
+    if (copy_len > remaining) {
+      copy_len = remaining;
+    }
+    copy_len = clamp_page_copy(g_lob_ctx.physical_page_size,
+                               offset + lob::LOB_HDR_SIZE, copy_len);
+    if (copy_len == 0) {
+      break;
+    }
+    out.append(reinterpret_cast<const char*>(header + lob::LOB_HDR_SIZE), copy_len);
+    total += copy_len;
+    remaining -= copy_len;
+
+    if (copy_len < static_cast<size_t>(part_len)) {
+      break;
+    }
+    page_no = next_page;
+    offset = FIL_PAGE_DATA;
+  }
+
+  return total;
+}
+
+static size_t read_lob_first_page(const unsigned char* page,
+                                  size_t want,
+                                  std::string& out) {
+  const uint32_t data_len = mach_read_from_4(page + LOB_FIRST_OFFSET_DATA_LEN);
+  const size_t max_data =
+      clamp_page_copy(g_lob_ctx.physical_page_size, LOB_FIRST_DATA_BEGIN, data_len);
+  size_t copy_len = want < max_data ? want : max_data;
+  if (copy_len == 0) {
+    return 0;
+  }
+  out.append(reinterpret_cast<const char*>(page + LOB_FIRST_DATA_BEGIN), copy_len);
+  return copy_len;
+}
+
+static size_t read_lob_data_page(const unsigned char* page,
+                                 size_t want,
+                                 std::string& out) {
+  const uint32_t data_len = mach_read_from_4(page + LOB_DATA_OFFSET_DATA_LEN);
+  const size_t max_data =
+      clamp_page_copy(g_lob_ctx.physical_page_size, LOB_DATA_DATA, data_len);
+  size_t copy_len = want < max_data ? want : max_data;
+  if (copy_len == 0) {
+    return 0;
+  }
+  out.append(reinterpret_cast<const char*>(page + LOB_DATA_DATA), copy_len);
+  return copy_len;
+}
+
+static size_t read_lob_new_format(const LobRef& ref,
+                                  size_t want,
+                                  std::string& out) {
+  if (want == 0 || ref.page_no == FIL_NULL) {
+    return 0;
+  }
+  std::vector<unsigned char> first_page(g_lob_ctx.physical_page_size);
+  if (!read_tablespace_page(ref.page_no, first_page)) {
+    return 0;
+  }
+  const uint16_t page_type = mach_read_from_2(first_page.data() + FIL_PAGE_TYPE);
+  if (page_type != FIL_PAGE_TYPE_LOB_FIRST) {
+    return 0;
+  }
+
+  const unsigned char* base = first_page.data() + LOB_FIRST_OFFSET_INDEX_LIST;
+  fil_addr_t addr = read_fil_addr(base + 4);
+  size_t remaining = want;
+  size_t total = 0;
+  size_t steps = 0;
+  const size_t max_steps = 100000;
+
+  std::vector<unsigned char> index_buf(g_lob_ctx.physical_page_size);
+  std::vector<unsigned char> data_buf(g_lob_ctx.physical_page_size);
+
+  while (!addr.is_null() && remaining > 0 && steps++ < max_steps) {
+    if (!read_tablespace_page(addr.page, index_buf)) {
+      break;
+    }
+    if (addr.boffset + LOB_INDEX_ENTRY_SIZE > g_lob_ctx.physical_page_size) {
+      break;
+    }
+    const unsigned char* node = index_buf.data() + addr.boffset;
+    fil_addr_t next_addr = read_fil_addr(node + LOB_INDEX_ENTRY_OFFSET_NEXT);
+    const uint32_t entry_version =
+        mach_read_from_4(node + LOB_INDEX_ENTRY_OFFSET_LOB_VERSION);
+    if (entry_version > ref.version) {
+      addr = next_addr;
+      continue;
+    }
+
+    const page_no_t data_page_no =
+        mach_read_from_4(node + LOB_INDEX_ENTRY_OFFSET_PAGE_NO);
+    if (data_page_no == FIL_NULL) {
+      addr = next_addr;
+      continue;
+    }
+
+    size_t copied = 0;
+    if (data_page_no == ref.page_no) {
+      copied = read_lob_first_page(first_page.data(), remaining, out);
+    } else if (read_tablespace_page(data_page_no, data_buf)) {
+      const uint16_t data_type = mach_read_from_2(data_buf.data() + FIL_PAGE_TYPE);
+      if (data_type == FIL_PAGE_TYPE_LOB_DATA) {
+        copied = read_lob_data_page(data_buf.data(), remaining, out);
+      }
+    }
+
+    total += copied;
+    remaining -= copied;
+    if (copied == 0) {
+      break;
+    }
+
+    addr = next_addr;
+  }
+
+  return total;
 }
 
 static unsigned int max_decimals_from_len(ulint len, ulint base_len) {
@@ -349,6 +595,87 @@ static bool format_innodb_time(const unsigned char* ptr, ulint len,
   char buf[MAX_DATE_STRING_REP_LENGTH];
   int n = my_time_to_str(tm, buf, dec);
   out.assign(buf, static_cast<size_t>(n));
+  return true;
+}
+
+static size_t read_lob_external(const LobRef& ref,
+                                size_t want,
+                                std::string& out) {
+  if (g_lob_ctx.fd < 0 || g_lob_ctx.tablespace_compressed) {
+    return 0;
+  }
+  std::vector<unsigned char> page_buf(g_lob_ctx.physical_page_size);
+  if (!read_tablespace_page(ref.page_no, page_buf)) {
+    return 0;
+  }
+  const uint16_t page_type = mach_read_from_2(page_buf.data() + FIL_PAGE_TYPE);
+  if (page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_SDI_BLOB) {
+    return read_lob_old_chain(ref, want, out);
+  }
+  if (page_type == FIL_PAGE_TYPE_LOB_FIRST) {
+    return read_lob_new_format(ref, want, out);
+  }
+  return 0;
+}
+
+static bool read_external_lob_value(const unsigned char* field_ptr,
+                                    ulint field_len,
+                                    std::string& out,
+                                    bool& truncated) {
+  truncated = false;
+  if (field_len < BTR_EXTERN_FIELD_REF_SIZE || g_lob_ctx.fd < 0) {
+    return false;
+  }
+
+  const ulint local_len = field_len - BTR_EXTERN_FIELD_REF_SIZE;
+  const unsigned char* ref_ptr = field_ptr + local_len;
+
+  LobRef ref{};
+  ref.space_id = mach_read_from_4(ref_ptr + lob::BTR_EXTERN_SPACE_ID);
+  ref.page_no = mach_read_from_4(ref_ptr + lob::BTR_EXTERN_PAGE_NO);
+  ref.offset = mach_read_from_4(ref_ptr + lob::BTR_EXTERN_OFFSET);
+  ref.version = ref.offset;
+  ref.length = mach_read_from_4(ref_ptr + lob::BTR_EXTERN_LEN + 4);
+  ref.being_modified =
+      (mach_read_from_1(ref_ptr + lob::BTR_EXTERN_LEN) &
+       lob::BTR_EXTERN_BEING_MODIFIED_FLAG) != 0;
+
+  if (ref.being_modified) {
+    return false;
+  }
+
+  const size_t total_len = static_cast<size_t>(local_len) + ref.length;
+  size_t limit = g_row_output.lob_max_bytes;
+  size_t target_total = total_len;
+  if (limit > 0 && total_len > limit) {
+    target_total = limit;
+    truncated = true;
+  }
+
+  out.clear();
+  out.reserve(target_total);
+  if (local_len > 0) {
+    size_t copy_len = local_len;
+    if (limit > 0 && copy_len > target_total) {
+      copy_len = target_total;
+      truncated = true;
+    }
+    out.append(reinterpret_cast<const char*>(field_ptr), copy_len);
+  }
+
+  if (ref.length == 0 || out.size() >= target_total) {
+    return true;
+  }
+
+  size_t want = ref.length;
+  if (limit > 0 && out.size() + want > target_total) {
+    want = target_total - out.size();
+  }
+
+  size_t read_bytes = read_lob_external(ref, want, out);
+  if (read_bytes != want) {
+    return false;
+  }
   return true;
 }
 
@@ -505,6 +832,29 @@ static FieldOutput format_field_value(const field_def_t& field,
   }
 
   if (is_extern) {
+    if (!hex &&
+        (field.type == FT_TEXT || field.type == FT_BLOB ||
+         field.type == FT_CHAR || field.type == FT_BIN)) {
+      std::string lob_data;
+      bool truncated = false;
+      if (read_external_lob_value(field_ptr, field_len, lob_data, truncated)) {
+        size_t max_len = lob_data.size();
+        if (g_row_output.lob_max_bytes > 0 && max_len > g_row_output.lob_max_bytes) {
+          max_len = g_row_output.lob_max_bytes;
+        }
+        if (field.type == FT_BLOB || field.type == FT_BIN) {
+          out.value = format_hex(reinterpret_cast<const unsigned char*>(lob_data.data()),
+                                 lob_data.size(), max_len);
+        } else {
+          out.value = format_text(reinterpret_cast<const unsigned char*>(lob_data.data()),
+                                  lob_data.size(), max_len);
+        }
+        if (truncated) {
+          out.value.append("...(truncated)");
+        }
+        return out;
+      }
+    }
     out.value = format_extern(field_ptr, field_len);
     return out;
   }
@@ -557,6 +907,10 @@ static FieldOutput format_field_value(const field_def_t& field,
     case FT_CHAR:
     case FT_TEXT:
       out.value = format_text(field_ptr, field_len);
+      break;
+    case FT_BLOB:
+    case FT_BIN:
+      out.value = format_hex(field_ptr, field_len, field_len);
       break;
     case FT_DATE: {
       std::string formatted;
