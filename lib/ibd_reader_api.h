@@ -34,6 +34,7 @@ extern "C" {
 /* Result codes */
 typedef enum {
     IBD_SUCCESS = 0,
+    IBD_END_OF_STREAM = 1,
     IBD_ERROR_INVALID_PARAM = -1,
     IBD_ERROR_FILE_NOT_FOUND = -2,
     IBD_ERROR_FILE_READ = -3,
@@ -353,7 +354,7 @@ IBD_API ibd_result_t ibd_get_column_info(ibd_table_t table,
  * Read the next row from the table.
  * @param table Table handle
  * @param row_out Output row handle (must be freed with ibd_free_row)
- * @return IBD_SUCCESS if row read, IBD_ERROR_FILE_READ if no more rows
+ * @return IBD_SUCCESS if row read, IBD_END_OF_STREAM if no more rows
  */
 IBD_API ibd_result_t ibd_read_row(ibd_table_t table, ibd_row_t* row_out);
 

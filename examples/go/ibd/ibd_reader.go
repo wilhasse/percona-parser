@@ -17,6 +17,7 @@ import (
 // Result codes
 const (
 	Success                     = C.IBD_SUCCESS
+	EndOfStream                = C.IBD_END_OF_STREAM
 	ErrorInvalidParam          = C.IBD_ERROR_INVALID_PARAM
 	ErrorFileNotFound          = C.IBD_ERROR_FILE_NOT_FOUND
 	ErrorFileRead              = C.IBD_ERROR_FILE_READ

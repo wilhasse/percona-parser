@@ -25,6 +25,7 @@ Complete API documentation for the InnoDB Reader Library (`ibd_reader_api.h`).
 ```c
 typedef enum {
     IBD_SUCCESS                     = 0,   // Operation successful
+    IBD_END_OF_STREAM               = 1,   // No more rows available
     IBD_ERROR_INVALID_PARAM        = -1,   // Invalid parameter passed
     IBD_ERROR_FILE_NOT_FOUND       = -2,   // File not found
     IBD_ERROR_FILE_READ            = -3,   // File read error

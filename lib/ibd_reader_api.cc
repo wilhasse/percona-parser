@@ -853,12 +853,12 @@ IBD_API ibd_result_t ibd_read_row(ibd_table_t table, ibd_row_t* row_out) {
     *row_out = nullptr;
 
     if (table->at_end) {
-        return IBD_ERROR_FILE_READ; // No more rows
+        return IBD_END_OF_STREAM; // No more rows
     }
 
     ibd_row_t row = read_next_record(table);
     if (!row) {
-        return IBD_ERROR_FILE_READ; // No more rows
+        return IBD_END_OF_STREAM; // No more rows
     }
 
     *row_out = row;

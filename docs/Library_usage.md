@@ -123,6 +123,7 @@ All functions return `ibd_result_t` codes:
 ```c
 typedef enum {
     IBD_SUCCESS = 0,
+    IBD_END_OF_STREAM = 1,
     IBD_ERROR_INVALID_PARAM = -1,
     IBD_ERROR_FILE_NOT_FOUND = -2,
     IBD_ERROR_FILE_READ = -3,

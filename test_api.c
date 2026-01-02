@@ -62,6 +62,9 @@ int main(int argc, char* argv[]) {
         ibd_free_row(row);
         row_count++;
     }
+    if (res != IBD_SUCCESS && res != IBD_END_OF_STREAM) {
+        printf("Row read failed: %d\n", res);
+    }
 
     printf("\nTotal rows read (limited to 10): %d\n", row_count);
     printf("Actual row count: %lu\n", (unsigned long)ibd_get_row_count(table));
