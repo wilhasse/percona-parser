@@ -388,16 +388,9 @@ IBD_API const char* ibd_get_page_type_name(uint16_t page_type) {
  * Table Row Parsing API Implementation
  * ============================================================================ */
 
-// Forward declarations from parser.cc
-extern int load_ib2sdi_table_columns(const char* json_path, std::string& table_name);
-extern int build_table_def_from_json(table_def_t* table, const char* tbl_name);
-extern int discover_target_index_id(int fd);
-extern bool is_target_index(const unsigned char* page);
-extern bool target_index_is_set();
+// Forward declarations from undrop_for_innodb
 extern table_def_t table_definitions[];
 extern int table_definitions_cnt;
-
-// Forward declarations from undrop_for_innodb
 extern bool check_for_a_record(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets);
 extern ulint my_rec_offs_nth_size(const ulint* offsets, ulint i);
 extern const unsigned char* my_rec_get_nth_field(const rec_t* rec, const ulint* offsets,
@@ -428,6 +421,7 @@ struct ibd_table_iterator {
     int fd;
     std::string table_name;
     table_def_t table_def;
+    parser_context_t parser_ctx;
 
     // Page iteration state
     size_t physical_page_size;
@@ -558,7 +552,7 @@ static bool load_next_leaf_page(ibd_table_iterator* iter) {
         }
 
         // Check if target index
-        if (!is_target_index(page_data)) {
+        if (!is_target_index(page_data, &iter->parser_ctx)) {
             iter->current_page++;
             continue;
         }
@@ -690,11 +684,12 @@ static ibd_row_t read_next_record(ibd_table_iterator* iter) {
         ctx.iter = iter;
         ctx.rows_parsed = 0;
 
-        int result = parse_records_with_callback(
+        (void)parse_records_with_callback(
             iter->page_buf.data(),
             page_size,
             iter->current_page,
             &iter->table_def,
+            &iter->parser_ctx,
             row_parse_callback,
             &ctx);
 
@@ -731,7 +726,7 @@ IBD_API ibd_result_t ibd_open_table(ibd_reader_t reader,
         iter->reader = reader;
 
         // Load schema from SDI JSON
-        if (load_ib2sdi_table_columns(sdi_json_path, iter->table_name) != 0) {
+        if (load_ib2sdi_table_columns(sdi_json_path, iter->table_name, &iter->parser_ctx) != 0) {
             iter->last_error = "Failed to load SDI JSON";
             if (reader) reader->set_error(iter->last_error);
             delete iter;
@@ -792,7 +787,7 @@ IBD_API ibd_result_t ibd_open_table(ibd_reader_t reader,
         iter->total_pages = st.st_size / iter->physical_page_size;
 
         // Discover target index
-        if (discover_target_index_id(iter->fd) != 0) {
+        if (discover_target_index_id(iter->fd, &iter->parser_ctx) != 0) {
             iter->last_error = "Cannot discover index ID";
             if (reader) reader->set_error(iter->last_error);
             delete iter;

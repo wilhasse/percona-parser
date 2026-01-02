@@ -42,7 +42,6 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 #include "tables_dict.h"
 #include "undrop_for_innodb.h"
 #include "decompress.h"
-#include "parser.h"
 
 struct XdesCache {
   page_no_t page_no = FIL_NULL;
@@ -2119,6 +2118,7 @@ int parse_records_with_callback(const unsigned char* page,
                                 size_t page_size,
                                 uint64_t page_no,
                                 table_def_t* table,
+                                const parser_context_t* ctx,
                                 record_callback_t callback,
                                 void* user_data) {
   if (!page || !table || !callback) {
@@ -2126,7 +2126,7 @@ int parse_records_with_callback(const unsigned char* page,
   }
 
   // 1) Check if this page belongs to the selected index
-  if (!is_target_index(page)) {
+  if (!is_target_index(page, ctx)) {
     return 0;
   }
 

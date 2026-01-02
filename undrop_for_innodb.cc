@@ -1102,7 +1102,7 @@ static size_t read_zblob_external(const LobRef& ref,
   return produced;
 }
 
-static unsigned int max_decimals_from_len(ulint len, ulint base_len) {
+[[maybe_unused]] static unsigned int max_decimals_from_len(ulint len, ulint base_len) {
   if (len <= base_len) {
     return 0;
   }

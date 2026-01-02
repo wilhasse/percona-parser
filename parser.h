@@ -1,3 +1,6 @@
+#ifndef PARSER_H
+#define PARSER_H
+
 // ---------------
 // Declarations from parser.cc
 // ---------------
@@ -57,6 +60,8 @@ void debug_print_compact_row(const page_t* page,
                              const table_def_t* table,
                              const ulint* offsets);
 
+#endif  // PARSER_H
+
 // ---------------
 // Callback-based record extraction for API use
 // ---------------
@@ -101,6 +106,7 @@ int parse_records_with_callback(const unsigned char* page,
                                 size_t page_size,
                                 uint64_t page_no,
                                 table_def_t* table,
+                                const parser_context_t* ctx,
                                 record_callback_t callback,
                                 void* user_data);
 
