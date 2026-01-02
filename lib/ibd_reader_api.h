@@ -264,6 +264,145 @@ IBD_API int ibd_is_page_compressed(const uint8_t* page_data,
  */
 IBD_API const char* ibd_get_page_type_name(uint16_t page_type);
 
+/* ============================================================================
+ * Table Row Parsing API (NEW)
+ * ============================================================================ */
+
+/* Column value types */
+typedef enum {
+    IBD_COL_NULL = 0,
+    IBD_COL_INT = 1,
+    IBD_COL_UINT = 2,
+    IBD_COL_FLOAT = 3,
+    IBD_COL_DOUBLE = 4,
+    IBD_COL_STRING = 5,
+    IBD_COL_BINARY = 6,
+    IBD_COL_DATETIME = 7,
+    IBD_COL_DATE = 8,
+    IBD_COL_TIME = 9,
+    IBD_COL_TIMESTAMP = 10,
+    IBD_COL_DECIMAL = 11,
+    IBD_COL_INTERNAL = 99
+} ibd_column_type_t;
+
+/* Column value structure */
+typedef struct {
+    const char* name;           /* Column name (do not free) */
+    ibd_column_type_t type;     /* Value type */
+    int is_null;                /* 1 if NULL */
+    union {
+        int64_t int_val;        /* For INT types */
+        uint64_t uint_val;      /* For UINT types */
+        double float_val;       /* For FLOAT/DOUBLE */
+        struct {
+            const char* data;   /* String/binary data (do not free) */
+            size_t length;      /* Length of data */
+        } str_val;
+    } value;
+    char formatted[256];        /* Formatted string representation */
+} ibd_column_value_t;
+
+/* Opaque handle for table iterator */
+typedef struct ibd_table_iterator* ibd_table_t;
+
+/* Opaque handle for row data */
+typedef struct ibd_row_data* ibd_row_t;
+
+/**
+ * Open a table for reading rows.
+ * @param reader Reader handle
+ * @param ibd_path Path to the .ibd file
+ * @param sdi_json_path Path to SDI JSON file (from ibd2sdi)
+ * @param table_out Output table iterator handle
+ * @return IBD_SUCCESS on success, error code otherwise
+ */
+IBD_API ibd_result_t ibd_open_table(ibd_reader_t reader,
+                                     const char* ibd_path,
+                                     const char* sdi_json_path,
+                                     ibd_table_t* table_out);
+
+/**
+ * Get table schema information.
+ * @param table Table handle
+ * @param table_name Output buffer for table name (optional, can be NULL)
+ * @param table_name_size Size of table_name buffer
+ * @param column_count Output column count
+ * @return IBD_SUCCESS on success, error code otherwise
+ */
+IBD_API ibd_result_t ibd_get_table_info(ibd_table_t table,
+                                         char* table_name,
+                                         size_t table_name_size,
+                                         uint32_t* column_count);
+
+/**
+ * Get column schema by index.
+ * @param table Table handle
+ * @param column_index Column index (0-based)
+ * @param name Output buffer for column name
+ * @param name_size Size of name buffer
+ * @param type Output column type
+ * @return IBD_SUCCESS on success, error code otherwise
+ */
+IBD_API ibd_result_t ibd_get_column_info(ibd_table_t table,
+                                          uint32_t column_index,
+                                          char* name,
+                                          size_t name_size,
+                                          ibd_column_type_t* type);
+
+/**
+ * Read the next row from the table.
+ * @param table Table handle
+ * @param row_out Output row handle (must be freed with ibd_free_row)
+ * @return IBD_SUCCESS if row read, IBD_ERROR_FILE_READ if no more rows
+ */
+IBD_API ibd_result_t ibd_read_row(ibd_table_t table, ibd_row_t* row_out);
+
+/**
+ * Get the number of columns in a row.
+ * @param row Row handle
+ * @return Number of columns
+ */
+IBD_API uint32_t ibd_row_column_count(ibd_row_t row);
+
+/**
+ * Get column value from a row.
+ * @param row Row handle
+ * @param column_index Column index (0-based)
+ * @param value Output column value structure
+ * @return IBD_SUCCESS on success, error code otherwise
+ */
+IBD_API ibd_result_t ibd_row_get_column(ibd_row_t row,
+                                         uint32_t column_index,
+                                         ibd_column_value_t* value);
+
+/**
+ * Get all column values as a formatted string (tab-separated).
+ * @param row Row handle
+ * @param buffer Output buffer
+ * @param buffer_size Size of buffer
+ * @return Actual length of string (may exceed buffer_size if truncated)
+ */
+IBD_API size_t ibd_row_to_string(ibd_row_t row, char* buffer, size_t buffer_size);
+
+/**
+ * Free a row handle.
+ * @param row Row handle to free
+ */
+IBD_API void ibd_free_row(ibd_row_t row);
+
+/**
+ * Close a table iterator and free resources.
+ * @param table Table handle to close
+ */
+IBD_API void ibd_close_table(ibd_table_t table);
+
+/**
+ * Get the total number of rows read so far.
+ * @param table Table handle
+ * @return Number of rows read
+ */
+IBD_API uint64_t ibd_get_row_count(ibd_table_t table);
+
 #ifdef __cplusplus
 }
 #endif

@@ -35,10 +35,12 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 #include "fsp0fsp.h"    // FSP_SPACE_ID
 #include "fsp0types.h"  // btr_root_fseg_validate() signature
 #include "my_time.h"
+#include "decimal.h"
 
 #include "tables_dict.h"
 #include "undrop_for_innodb.h"
 #include "decompress.h"
+#include "parser.h"
 
 struct XdesCache {
   page_no_t page_no = FIL_NULL;
@@ -311,6 +313,61 @@ bool format_innodb_timestamp(const unsigned char* ptr, ulint len,
     n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n),
                        ".%0*d", dec, frac);
   }
+  out.assign(buf, static_cast<size_t>(n));
+  return true;
+}
+
+// Helper to read signed big-endian integer (for DATE/TIME)
+// InnoDB stores signed integers with the sign bit flipped for B-tree ordering
+static int64_t read_be_int_signed(const unsigned char* ptr, size_t len) {
+  if (len == 0 || len > 8) {
+    return 0;
+  }
+  uint64_t val = 0;
+  for (size_t i = 0; i < len; i++) {
+    val = (val << 8) | ptr[i];
+  }
+  uint64_t sign_mask = 1ULL << (len * 8 - 1);
+  val ^= sign_mask;
+  if ((val & sign_mask) && len < 8) {
+    uint64_t mask = ~0ULL << (len * 8);
+    val |= mask;
+  }
+  return static_cast<int64_t>(val);
+}
+
+bool format_innodb_date(const unsigned char* ptr, ulint len, std::string& out) {
+  if (!ptr || len < 3) {
+    return false;
+  }
+  // Decode with sign-bit flip, then unpack as YYYYMMDD
+  uint32_t raw = static_cast<uint32_t>(read_be_int_signed(ptr, len));
+  unsigned int day = raw & 31;
+  unsigned int month = (raw >> 5) & 15;
+  unsigned int year = raw >> 9;
+  char buf[16];
+  int n = std::snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
+  out.assign(buf, static_cast<size_t>(n));
+  return true;
+}
+
+bool format_innodb_time(const unsigned char* ptr, ulint len,
+                        unsigned int dec, std::string& out) {
+  if (!ptr || len < 3) {
+    return false;
+  }
+  if (dec > 6) {
+    dec = 6;
+  }
+  unsigned int max_dec = max_decimals_from_len(len, 3);
+  if (dec > max_dec) {
+    dec = max_dec;
+  }
+  longlong packed = my_time_packed_from_binary(ptr, dec);
+  MYSQL_TIME tm{};
+  TIME_from_longlong_time_packed(&tm, packed);
+  char buf[MAX_DATE_STRING_REP_LENGTH];
+  int n = my_time_to_str(tm, buf, dec);
   out.assign(buf, static_cast<size_t>(n));
   return true;
 }
@@ -911,26 +968,14 @@ static bool parse_uint32_value(const std::string& s, uint32_t* out) {
   return true;
 }
 
+// read_be_int_signed is defined earlier (near line 322)
+
 static uint64_t read_be_uint(const unsigned char* ptr, size_t len) {
   uint64_t val = 0;
   for (size_t i = 0; i < len; i++) {
     val = (val << 8) | ptr[i];
   }
   return val;
-}
-
-static int64_t read_be_int_signed(const unsigned char* ptr, size_t len) {
-  if (len == 0 || len > 8) {
-    return 0;
-  }
-  uint64_t val = read_be_uint(ptr, len);
-  uint64_t sign_mask = 1ULL << (len * 8 - 1);
-  val ^= sign_mask;
-  if (val & sign_mask && len < 8) {
-    uint64_t mask = ~0ULL << (len * 8);
-    val |= mask;
-  }
-  return static_cast<int64_t>(val);
 }
 
 static bool parse_first_paren_number(const std::string& s, unsigned int* out) {
@@ -1704,4 +1749,426 @@ void parse_records_on_page(const unsigned char* page,
               << n_invalid << " invalid)";
   }
   std::cout << ".\n";
+}
+
+// ============================================================================
+// Callback-based record extraction for API use
+// ============================================================================
+
+// Helper to read signed big-endian integer for extraction
+// InnoDB stores signed integers with the sign bit flipped for B-tree ordering
+static int64_t extract_be_int_signed(const unsigned char* ptr, size_t len) {
+  if (len == 0 || len > 8) return 0;
+
+  // Read as big-endian unsigned
+  uint64_t raw = 0;
+  for (size_t i = 0; i < len; i++) {
+    raw = (raw << 8) | ptr[i];
+  }
+
+  // Flip the sign bit (highest bit)
+  uint64_t sign_bit = 1ULL << (len * 8 - 1);
+  raw ^= sign_bit;
+
+  // Now interpret as signed: if high bit is set, sign-extend
+  if (raw & sign_bit) {
+    // Negative: extend sign bits
+    uint64_t mask = ~((1ULL << (len * 8)) - 1);
+    return static_cast<int64_t>(raw | mask);
+  }
+  return static_cast<int64_t>(raw);
+}
+
+// Helper to read unsigned big-endian integer for extraction
+static uint64_t extract_be_uint(const unsigned char* ptr, size_t len) {
+  if (len == 0 || len > 8) return 0;
+  uint64_t val = 0;
+  for (size_t i = 0; i < len; i++) {
+    val = (val << 8) | ptr[i];
+  }
+  return val;
+}
+
+bool extract_record_data(const page_t* page,
+                         const rec_t* rec,
+                         table_def_t* table,
+                         const ulint* offsets,
+                         uint64_t page_no,
+                         ulint rec_offset,
+                         bool deleted,
+                         parsed_row_t* out_row) {
+  if (!out_row || !table || !rec || !offsets) {
+    return false;
+  }
+
+  memset(out_row, 0, sizeof(*out_row));
+  out_row->page_no = page_no;
+  out_row->rec_offset = rec_offset;
+  out_row->deleted = deleted;
+  out_row->column_count = 0;
+
+  for (ulint i = 0; i < (ulint)table->fields_count && i < MAX_TABLE_FIELDS; i++) {
+    parsed_column_t& col = out_row->columns[out_row->column_count];
+    const field_def_t& field = table->fields[i];
+
+    col.name = field.name;
+    col.field_type = field.type;
+    col.is_internal = (field.type == FT_INTERNAL);
+    col.is_null = false;
+    col.data = nullptr;
+    col.data_len = 0;
+    col.int_val = 0;
+    col.formatted[0] = '\0';
+
+    ulint field_len = 0;
+    const unsigned char* field_ptr = my_rec_get_nth_field(rec, offsets, i, &field_len);
+
+    if (field_len == UNIV_SQL_NULL) {
+      col.is_null = true;
+      snprintf(col.formatted, sizeof(col.formatted), "NULL");
+      out_row->column_count++;
+      continue;
+    }
+
+    col.data = field_ptr;
+    col.data_len = field_len;
+
+    // Format based on field type
+    switch (field.type) {
+      case FT_INT: {
+        col.int_val = extract_be_int_signed(field_ptr, field_len);
+        snprintf(col.formatted, sizeof(col.formatted), "%lld",
+                 (long long)col.int_val);
+        break;
+      }
+      case FT_UINT: {
+        col.uint_val = extract_be_uint(field_ptr, field_len);
+        snprintf(col.formatted, sizeof(col.formatted), "%llu",
+                 (unsigned long long)col.uint_val);
+        break;
+      }
+      case FT_FLOAT: {
+        if (field_len == 4) {
+          uint32_t raw = static_cast<uint32_t>(extract_be_uint(field_ptr, 4));
+          float f;
+          memcpy(&f, &raw, sizeof(f));
+          col.double_val = f;
+          snprintf(col.formatted, sizeof(col.formatted), "%f", f);
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "(binary float)");
+        }
+        break;
+      }
+      case FT_DOUBLE: {
+        if (field_len == 8) {
+          uint64_t raw = extract_be_uint(field_ptr, 8);
+          double d;
+          memcpy(&d, &raw, sizeof(d));
+          col.double_val = d;
+          snprintf(col.formatted, sizeof(col.formatted), "%f", d);
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "(binary double)");
+        }
+        break;
+      }
+      case FT_CHAR:
+      case FT_TEXT: {
+        // Copy as string, handle length limit
+        size_t copy_len = (field_len < sizeof(col.formatted) - 1)
+                              ? field_len
+                              : sizeof(col.formatted) - 1;
+        memcpy(col.formatted, field_ptr, copy_len);
+        col.formatted[copy_len] = '\0';
+        // Trim trailing spaces for CHAR
+        if (field.type == FT_CHAR) {
+          while (copy_len > 0 && col.formatted[copy_len - 1] == ' ') {
+            col.formatted[--copy_len] = '\0';
+          }
+        }
+        break;
+      }
+      case FT_DATE: {
+        // InnoDB DATE: 3 bytes, sign-bit flipped
+        std::string date_str;
+        if (format_innodb_date(field_ptr, field_len, date_str)) {
+          strncpy(col.formatted, date_str.c_str(), sizeof(col.formatted) - 1);
+          col.formatted[sizeof(col.formatted) - 1] = '\0';
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "(invalid date)");
+        }
+        break;
+      }
+      case FT_TIME: {
+        // InnoDB TIME: 3+ bytes
+        std::string time_str;
+        if (format_innodb_time(field_ptr, field_len, field.time_precision, time_str)) {
+          strncpy(col.formatted, time_str.c_str(), sizeof(col.formatted) - 1);
+          col.formatted[sizeof(col.formatted) - 1] = '\0';
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "(invalid time)");
+        }
+        break;
+      }
+      case FT_DATETIME: {
+        // InnoDB DATETIME: 5-8 bytes
+        std::string dt_str;
+        if (format_innodb_datetime(field_ptr, field_len, field.time_precision, dt_str)) {
+          strncpy(col.formatted, dt_str.c_str(), sizeof(col.formatted) - 1);
+          col.formatted[sizeof(col.formatted) - 1] = '\0';
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "(invalid datetime)");
+        }
+        break;
+      }
+      case FT_TIMESTAMP: {
+        // InnoDB TIMESTAMP: 4-7 bytes
+        std::string ts_str;
+        if (format_innodb_timestamp(field_ptr, field_len, field.time_precision, ts_str)) {
+          strncpy(col.formatted, ts_str.c_str(), sizeof(col.formatted) - 1);
+          col.formatted[sizeof(col.formatted) - 1] = '\0';
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "(invalid timestamp)");
+        }
+        break;
+      }
+      case FT_YEAR: {
+        // InnoDB YEAR: 1 byte, offset from 1900
+        if (field_len == 1) {
+          unsigned int year = (field_ptr[0] == 0) ? 0 : 1900 + field_ptr[0];
+          snprintf(col.formatted, sizeof(col.formatted), "%04u", year);
+          col.uint_val = year;
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "(invalid year)");
+        }
+        break;
+      }
+      case FT_BIT: {
+        // InnoDB BIT: 1-8 bytes as unsigned integer
+        if (field_len <= 8) {
+          col.uint_val = extract_be_uint(field_ptr, field_len);
+          snprintf(col.formatted, sizeof(col.formatted), "%llu",
+                   (unsigned long long)col.uint_val);
+        } else {
+          // Too long - show as hex
+          size_t hex_len = 0;
+          for (size_t j = 0; j < field_len && hex_len < sizeof(col.formatted) - 3; j++) {
+            hex_len += snprintf(col.formatted + hex_len,
+                                sizeof(col.formatted) - hex_len,
+                                "%02X", field_ptr[j]);
+          }
+        }
+        break;
+      }
+      case FT_ENUM: {
+        // InnoDB ENUM: 1-2 bytes as unsigned integer (index into enum values)
+        uint64_t idx = extract_be_uint(field_ptr, field_len);
+        col.uint_val = idx;
+        // Try to get the string value from enum_values
+        if (field.has_limits && field.limits.enum_values_count > 0 &&
+            idx > 0 && idx <= (uint64_t)field.limits.enum_values_count) {
+          const char* val = field.limits.enum_values[idx - 1];
+          if (val) {
+            strncpy(col.formatted, val, sizeof(col.formatted) - 1);
+            col.formatted[sizeof(col.formatted) - 1] = '\0';
+          } else {
+            snprintf(col.formatted, sizeof(col.formatted), "%llu",
+                     (unsigned long long)idx);
+          }
+        } else if (idx == 0) {
+          col.formatted[0] = '\0';  // Empty string for index 0
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "%llu",
+                   (unsigned long long)idx);
+        }
+        break;
+      }
+      case FT_SET: {
+        // InnoDB SET: 1-8 bytes as bitmask
+        if (field_len > 8) {
+          size_t hex_len = 0;
+          for (size_t j = 0; j < field_len && hex_len < sizeof(col.formatted) - 3; j++) {
+            hex_len += snprintf(col.formatted + hex_len,
+                                sizeof(col.formatted) - hex_len,
+                                "%02X", field_ptr[j]);
+          }
+          break;
+        }
+        uint64_t mask = extract_be_uint(field_ptr, field_len);
+        col.uint_val = mask;
+        // Try to build comma-separated list from set_values
+        if (field.has_limits && field.limits.set_values_count > 0) {
+          std::string set_str;
+          for (int i = 0; i < field.limits.set_values_count && i < 64; i++) {
+            if (mask & (1ULL << i)) {
+              const char* val = field.limits.set_values[i];
+              if (val) {
+                if (!set_str.empty()) {
+                  set_str += ",";
+                }
+                set_str += val;
+              }
+            }
+          }
+          strncpy(col.formatted, set_str.c_str(), sizeof(col.formatted) - 1);
+          col.formatted[sizeof(col.formatted) - 1] = '\0';
+        } else {
+          snprintf(col.formatted, sizeof(col.formatted), "%llu",
+                   (unsigned long long)mask);
+        }
+        break;
+      }
+      case FT_DECIMAL: {
+        // InnoDB DECIMAL: binary format using bin2decimal
+        // Constants: DIG_PER_DEC1=9, max precision=81, max str len=83
+        int precision = field.decimal_precision;
+        int scale = field.decimal_digits;
+        if (precision <= 0 || scale < 0 || scale > precision) {
+          // Invalid precision/scale - show as hex
+          size_t hex_len = 0;
+          for (size_t j = 0; j < field_len && hex_len < sizeof(col.formatted) - 3; j++) {
+            hex_len += snprintf(col.formatted + hex_len,
+                                sizeof(col.formatted) - hex_len,
+                                "%02X", field_ptr[j]);
+          }
+          break;
+        }
+        int bin_size = decimal_bin_size(precision, scale);
+        if (bin_size <= 0 || field_len < static_cast<ulint>(bin_size)) {
+          // Size mismatch - show as hex
+          size_t hex_len = 0;
+          for (size_t j = 0; j < field_len && hex_len < sizeof(col.formatted) - 3; j++) {
+            hex_len += snprintf(col.formatted + hex_len,
+                                sizeof(col.formatted) - hex_len,
+                                "%02X", field_ptr[j]);
+          }
+          break;
+        }
+        // Decode decimal (81/9 + 2 = 11 buffer entries should be enough)
+        decimal_t dec;
+        decimal_digit_t dec_buf[12];
+        dec.buf = dec_buf;
+        dec.len = sizeof(dec_buf) / sizeof(dec_buf[0]);
+        dec.intg = precision - scale;
+        dec.frac = scale;
+        int err = bin2decimal(field_ptr, &dec, precision, scale, false);
+        if (err & E_DEC_FATAL_ERROR) {
+          snprintf(col.formatted, sizeof(col.formatted), "(invalid decimal)");
+          break;
+        }
+        // Convert to string (max 83 chars + null)
+        char dec_str[100];
+        int out_len = sizeof(dec_str) - 1;
+        err = decimal2string(&dec, dec_str, &out_len);
+        if (err & E_DEC_FATAL_ERROR || out_len <= 0) {
+          snprintf(col.formatted, sizeof(col.formatted), "(invalid decimal)");
+          break;
+        }
+        dec_str[out_len] = '\0';
+        strncpy(col.formatted, dec_str, sizeof(col.formatted) - 1);
+        col.formatted[sizeof(col.formatted) - 1] = '\0';
+        break;
+      }
+      case FT_INTERNAL: {
+        // Internal columns (DB_TRX_ID, DB_ROLL_PTR)
+        col.uint_val = extract_be_uint(field_ptr, field_len);
+        snprintf(col.formatted, sizeof(col.formatted), "%llu",
+                 (unsigned long long)col.uint_val);
+        break;
+      }
+      default: {
+        // Binary/blob/other: hex representation
+        size_t hex_len = 0;
+        for (size_t j = 0; j < field_len && hex_len < sizeof(col.formatted) - 3; j++) {
+          hex_len += snprintf(col.formatted + hex_len,
+                              sizeof(col.formatted) - hex_len,
+                              "%02X", field_ptr[j]);
+        }
+        break;
+      }
+    }
+
+    out_row->column_count++;
+  }
+
+  return true;
+}
+
+int parse_records_with_callback(const unsigned char* page,
+                                size_t page_size,
+                                uint64_t page_no,
+                                table_def_t* table,
+                                record_callback_t callback,
+                                void* user_data) {
+  if (!page || !table || !callback) {
+    return 0;
+  }
+
+  // 1) Check if this page belongs to the selected index
+  if (!is_target_index(page)) {
+    return 0;
+  }
+
+  // 2) Check if it's a LEAF page
+  ulint page_level = mach_read_from_2(page + PAGE_HEADER + PAGE_LEVEL);
+  if (page_level != 0) {
+    return 0;  // Non-leaf
+  }
+
+  // 3) Check if COMPACT format
+  bool is_compact = page_is_comp(page);
+  if (!is_compact) {
+    return 0;  // REDUNDANT not supported
+  }
+
+  // 4) Loop through records
+  const ulint inf_offset = PAGE_NEW_INFIMUM;
+  int valid_records = 0;
+  ulint rec_offset = inf_offset;
+  ulint steps = 0;
+  ulint max_steps = static_cast<ulint>(page_size / (REC_N_NEW_EXTRA_BYTES + 1));
+  const ulint n_recs = mach_read_from_2(page + PAGE_HEADER + PAGE_N_RECS);
+  if (max_steps < n_recs + 2) {
+    max_steps = n_recs + 2;
+  }
+
+  while (steps < max_steps) {
+    const rec_t* rec = reinterpret_cast<const rec_t*>(page + rec_offset);
+    const ulint status = rec_get_status(rec);
+    if (status == REC_STATUS_SUPREMUM) {
+      break;
+    }
+
+    if (status == REC_STATUS_ORDINARY) {
+      const bool deleted = rec_get_deleted_flag(rec, true);
+
+      // Validate record
+      ulint offsets[MAX_TABLE_FIELDS + 2];
+      bool valid = check_for_a_record((page_t*)page, (rec_t*)rec, table, offsets);
+
+      if (valid) {
+        parsed_row_t row;
+        if (extract_record_data((page_t*)page, rec, table, offsets,
+                                page_no, rec_offset, deleted, &row)) {
+          // Call the callback
+          if (!callback(&row, user_data)) {
+            // Callback returned false - stop iteration
+            return valid_records;
+          }
+          valid_records++;
+        }
+      }
+    }
+
+    ulint next_off = 0;
+    if (!next_compact_rec_offset((const page_t*)page, rec_offset, page_size, &next_off)) {
+      break;
+    }
+    if (next_off == rec_offset || next_off >= page_size) {
+      break;
+    }
+    rec_offset = next_off;
+    steps++;
+  }
+
+  return valid_records;
 }

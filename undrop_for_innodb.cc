@@ -1114,42 +1114,8 @@ static unsigned int max_decimals_from_len(ulint len, ulint base_len) {
   return max_dec;
 }
 
-static bool format_innodb_date(const unsigned char* ptr, ulint len, std::string& out) {
-  if (!ptr || len < 3) {
-    return false;
-  }
-  uint32_t raw = static_cast<uint32_t>(read_be_int_signed(ptr, len));
-  MYSQL_TIME tm{};
-  tm.time_type = MYSQL_TIMESTAMP_DATE;
-  tm.day = static_cast<unsigned int>(raw & 31);
-  tm.month = static_cast<unsigned int>((raw >> 5) & 15);
-  tm.year = static_cast<unsigned int>(raw >> 9);
-  char buf[MAX_DATE_STRING_REP_LENGTH];
-  int n = my_date_to_str(tm, buf);
-  out.assign(buf, static_cast<size_t>(n));
-  return true;
-}
-
-static bool format_innodb_time(const unsigned char* ptr, ulint len,
-                               unsigned int dec, std::string& out) {
-  if (!ptr || len < 3) {
-    return false;
-  }
-  if (dec > 6) {
-    dec = 6;
-  }
-  unsigned int max_dec = max_decimals_from_len(len, 3);
-  if (dec > max_dec) {
-    dec = max_dec;
-  }
-  longlong packed = my_time_packed_from_binary(ptr, dec);
-  MYSQL_TIME tm{};
-  TIME_from_longlong_time_packed(&tm, packed);
-  char buf[MAX_DATE_STRING_REP_LENGTH];
-  int n = my_time_to_str(tm, buf, dec);
-  out.assign(buf, static_cast<size_t>(n));
-  return true;
-}
+// format_innodb_date and format_innodb_time are now defined in parser.cc
+// and declared in parser.h
 
 static size_t read_lob_external(const LobRef& ref,
                                 size_t want,

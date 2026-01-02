@@ -2,7 +2,7 @@
 ,
 {
 	"type": 1,
-	"id": 1900,
+	"id": 2008,
 	"object":
 		{
     "mysqld_version_id": 80044,
@@ -12,8 +12,8 @@
     "dd_object": {
         "name": "idx_fixture",
         "mysql_version_id": 80044,
-        "created": 20251229220505,
-        "last_altered": 20251229220505,
+        "created": 20251229235927,
+        "last_altered": 20251229235927,
         "hidden": 1,
         "options": "avg_row_length=0;encrypt_type=N;explicit_encryption=0;key_block_size=0;keys_disabled=0;pack_record=1;row_type=2;stats_auto_recalc=0;stats_sample_pages=0;",
         "columns": [
@@ -46,7 +46,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1851;",
+                "se_private_data": "table_id=1943;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 2,
@@ -84,7 +84,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1851;",
+                "se_private_data": "table_id=1943;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 4,
@@ -122,7 +122,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1851;",
+                "se_private_data": "table_id=1943;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -160,7 +160,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "interval_count=0;",
-                "se_private_data": "table_id=1851;",
+                "se_private_data": "table_id=1943;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 4,
@@ -198,7 +198,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "",
-                "se_private_data": "table_id=1851;",
+                "se_private_data": "table_id=1943;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -236,7 +236,7 @@
                 "generation_expression": "",
                 "generation_expression_utf8": "",
                 "options": "",
-                "se_private_data": "table_id=1851;",
+                "se_private_data": "table_id=1943;",
                 "engine_attribute": "",
                 "secondary_engine_attribute": "",
                 "column_key": 1,
@@ -247,7 +247,7 @@
             }
         ],
         "schema_ref": "test_secondary_index",
-        "se_private_id": 1851,
+        "se_private_id": 1943,
         "engine": "InnoDB",
         "last_checked_for_upgrade_version_id": 0,
         "comment": "",
@@ -271,7 +271,7 @@
                 "ordinal_position": 1,
                 "comment": "",
                 "options": "flags=0;",
-                "se_private_data": "id=1467;root=4;space_id=335;table_id=1851;trx_id=1928568;",
+                "se_private_data": "id=1597;root=4;space_id=407;table_id=1943;trx_id=1946489;",
                 "type": 1,
                 "algorithm": 2,
                 "is_algorithm_explicit": false,
@@ -332,7 +332,7 @@
                 "ordinal_position": 2,
                 "comment": "",
                 "options": "flags=0;",
-                "se_private_data": "id=1468;root=5;space_id=335;table_id=1851;trx_id=1928568;",
+                "se_private_data": "id=1598;root=5;space_id=407;table_id=1943;trx_id=1946489;",
                 "type": 3,
                 "algorithm": 2,
                 "is_algorithm_explicit": false,
@@ -372,7 +372,7 @@
                 "ordinal_position": 3,
                 "comment": "",
                 "options": "flags=0;",
-                "se_private_data": "id=1469;root=6;space_id=335;table_id=1851;trx_id=1928568;",
+                "se_private_data": "id=1599;root=6;space_id=407;table_id=1943;trx_id=1946489;",
                 "type": 3,
                 "algorithm": 2,
                 "is_algorithm_explicit": false,
@@ -409,7 +409,7 @@
 ,
 {
 	"type": 2,
-	"id": 339,
+	"id": 411,
 	"object":
 		{
     "mysqld_version_id": 80044,
@@ -420,14 +420,14 @@
         "name": "test_secondary_index/idx_fixture",
         "comment": "",
         "options": "autoextend_size=0;encryption=N;",
-        "se_private_data": "flags=16417;id=335;server_version=80044;space_version=1;state=normal;",
+        "se_private_data": "flags=16417;id=407;server_version=80044;space_version=1;state=normal;",
         "engine": "InnoDB",
         "engine_attribute": "",
         "files": [
             {
                 "ordinal_position": 1,
                 "filename": "./test_secondary_index/idx_fixture.ibd",
-                "se_private_data": "id=335;"
+                "se_private_data": "id=407;"
             }
         ]
     }
