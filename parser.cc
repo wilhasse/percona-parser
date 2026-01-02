@@ -38,6 +38,8 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 #include "fsp0types.h"  // btr_root_fseg_validate() signature
 #include "my_time.h"
 #include "decimal.h"
+#include "my_sys.h"
+#include "m_ctype.h"
 
 #include "tables_dict.h"
 #include "undrop_for_innodb.h"
@@ -1104,6 +1106,17 @@ static unsigned int clamp_var_max(unsigned int default_len, uint32_t col_len) {
   return default_len;
 }
 
+static bool char_is_variable_length(uint32_t collation_id) {
+  if (collation_id == 0) {
+    return false;
+  }
+  const CHARSET_INFO* cs = get_charset(collation_id, MYF(0));
+  if (cs == nullptr || cs == &my_charset_bin) {
+    return false;
+  }
+  return cs->mbmaxlen > 1;
+}
+
 static bool is_internal_column_name(const std::string& name) {
   return (name == "DB_TRX_ID" || name == "DB_ROLL_PTR" || name == "DB_ROW_ID");
 }
@@ -1289,7 +1302,11 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
             if (parse_first_paren_number(type, &parsed) && len == 0) {
                 len = parsed;
             }
-            set_fixed(fld, len);
+            if (char_is_variable_length(col.collation_id)) {
+                set_var(fld, len);
+            } else {
+                set_fixed(fld, len);
+            }
 
         } else if (type.find("tinytext") != std::string::npos) {
             fld->type = FT_TEXT;
