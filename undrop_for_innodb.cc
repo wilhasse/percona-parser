@@ -1792,6 +1792,12 @@ struct FieldOutput {
   std::string value;
 };
 
+static void rstrip_spaces(std::string& value) {
+  while (!value.empty() && value.back() == ' ') {
+    value.pop_back();
+  }
+}
+
 static FieldOutput format_field_value(const field_def_t& field,
                                       const unsigned char* field_ptr,
                                       ulint field_len,
@@ -1837,6 +1843,9 @@ static FieldOutput format_field_value(const field_def_t& field,
               reinterpret_cast<const unsigned char*>(lob_data.data()),
               static_cast<ulint>(lob_data.size()),
               field.collation_id, static_cast<ulint>(max_len));
+          if (field.type == FT_CHAR && field.char_rstrip_spaces) {
+            rstrip_spaces(out.value);
+          }
         }
         if (truncated) {
           out.value.append("...(truncated)");
@@ -1897,6 +1906,9 @@ static FieldOutput format_field_value(const field_def_t& field,
     case FT_TEXT:
       out.value = format_text_with_charset(field_ptr, field_len,
                                            field.collation_id);
+      if (field.type == FT_CHAR && field.char_rstrip_spaces) {
+        rstrip_spaces(out.value);
+      }
       break;
     case FT_JSON: {
       std::string decoded;

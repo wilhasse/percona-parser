@@ -39,16 +39,17 @@ SET NAMES utf8mb4;
 CREATE TABLE $TABLE_NAME (
   id INT PRIMARY KEY,
   latin1_text VARCHAR(50) CHARACTER SET latin1 COLLATE latin1_swedish_ci,
+  utf8_char CHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
   utf8_text VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
   emoji_text VARCHAR(50) CHARACTER SET utf8mb4,
   notes TEXT CHARACTER SET utf8mb4
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
 
 INSERT INTO $TABLE_NAME
-  (id, latin1_text, utf8_text, emoji_text, notes)
+  (id, latin1_text, utf8_char, utf8_text, emoji_text, notes)
 VALUES
-  (1, 'Café', 'São Paulo', 'Rocket 🚀', 'Emoji 😀 and accents: áéíóú'),
-  (2, 'Niño', 'München', 'Smile 🙂', 'naïve façade');
+  (1, 'Café', 'Açaí', 'São Paulo', 'Rocket 🚀', 'Emoji 😀 and accents: áéíóú'),
+  (2, 'Niño', 'München', 'München', 'Smile 🙂', 'naïve façade');
 SQL
 
 echo "==> Exporting .ibd and SDI"
@@ -82,6 +83,7 @@ mysql_out="$OUT_DIR/mysql.jsonl"
       SELECT JSON_OBJECT( \
         'id', id, \
         'latin1_text', latin1_text, \
+        'utf8_char', utf8_char, \
         'utf8_text', utf8_text, \
         'emoji_text', emoji_text, \
         'notes', notes \

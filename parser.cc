@@ -1117,6 +1117,17 @@ static bool char_is_variable_length(uint32_t collation_id) {
   return cs->mbmaxlen > 1;
 }
 
+static bool char_should_rstrip_spaces(uint32_t collation_id) {
+  if (collation_id == 0) {
+    return false;
+  }
+  const CHARSET_INFO* cs = get_charset(collation_id, MYF(0));
+  if (cs == nullptr || cs == &my_charset_bin) {
+    return false;
+  }
+  return cs->pad_attribute == PAD_SPACE;
+}
+
 static bool is_internal_column_name(const std::string& name) {
   return (name == "DB_TRX_ID" || name == "DB_ROLL_PTR" || name == "DB_ROW_ID");
 }
@@ -1302,6 +1313,7 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
             if (parse_first_paren_number(type, &parsed) && len == 0) {
                 len = parsed;
             }
+            fld->char_rstrip_spaces = char_should_rstrip_spaces(col.collation_id);
             if (char_is_variable_length(col.collation_id)) {
                 set_var(fld, len);
             } else {
