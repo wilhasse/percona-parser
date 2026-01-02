@@ -605,9 +605,11 @@ static int do_parse_main(int argc, char** argv)
     return 1;
   }
 
+  parser_context_t parser_ctx;
+
   // 0) Load table definition and extract table name
   std::string table_name;
-  if (load_ib2sdi_table_columns(json_file, table_name) != 0) {
+  if (load_ib2sdi_table_columns(json_file, table_name, &parser_ctx) != 0) {
     std::cerr << "Failed to load table columns from JSON.\n";
     return 1;
   }
@@ -619,7 +621,7 @@ static int do_parse_main(int argc, char** argv)
 
   if (has_sdi_index_definitions()) {
     std::string err;
-    if (!select_index_for_parsing(index_selector, &err)) {
+    if (!select_index_for_parsing(&parser_ctx, index_selector, &err)) {
       std::cerr << "Index selection failed: " << err << "\n";
       return 1;
     }
@@ -651,24 +653,24 @@ static int do_parse_main(int argc, char** argv)
     return 1;
   }
 
-  if (!target_index_is_set()) {
-    page_no_t root = selected_index_root();
+  if (!target_index_is_set(&parser_ctx)) {
+    page_no_t root = selected_index_root(&parser_ctx);
     uint64_t idx_id = 0;
     if (root != FIL_NULL && read_index_id_from_root(sys_fd, root, &idx_id)) {
-      set_target_index_id_from_value(idx_id);
+      set_target_index_id_from_value(&parser_ctx, idx_id);
     }
   }
 
-  if (!target_index_is_set()) {
+  if (!target_index_is_set(&parser_ctx)) {
     if (index_selector_explicit && has_sdi_index_definitions()) {
       std::cerr << "Could not resolve index id for selected index '"
-                << selected_index_name() << "'.\n";
+                << selected_index_name(&parser_ctx) << "'.\n";
       ::close(sys_fd);
       my_thread_end();
       my_end(0);
       return 1;
     }
-    if (discover_target_index_id(sys_fd) != 0) {
+    if (discover_target_index_id(sys_fd, &parser_ctx) != 0) {
       std::cerr << "Could not discover index from " << in_file << std::endl;
       ::close(sys_fd);
       my_thread_end();
@@ -827,7 +829,7 @@ static int do_parse_main(int argc, char** argv)
       continue;
     }
 
-    parse_records_on_page(parse_buf, parse_size, page_no);
+    parse_records_on_page(parse_buf, parse_size, page_no, &parser_ctx);
 
     page_no++;
   }

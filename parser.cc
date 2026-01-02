@@ -23,6 +23,8 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 #include <fstream>
 #include <iostream>
 
+#include "parser.h"
+
 // InnoDB includes
 #include "page0page.h"  // For page structure constants
 #include "rem0rec.h"    // For record handling
@@ -121,17 +123,11 @@ static std::unordered_map<std::string, std::string> parse_kv_string(
 static bool parse_uint64_value(const std::string& s, uint64_t* out);
 static bool parse_uint32_value(const std::string& s, uint32_t* out);
 
-// We'll store the discovered ID in this struct:
-struct Dulint {
-  uint32_t high;
-  uint32_t low;
-};
-
-// Global or static variable to store the selected index ID.
-static Dulint g_target_index_id = {0, 0};
-static bool   g_found_target    = false;
-static std::string g_target_index_name = "PRIMARY";
-static page_no_t g_target_index_root = FIL_NULL;
+parser_context_t::parser_context_t()
+    : target_index_id(0),
+      target_index_set(false),
+      target_index_name("PRIMARY"),
+      target_index_root(FIL_NULL) {}
 
 /**
  * btr_root_fseg_validate():
@@ -372,10 +368,12 @@ bool format_innodb_time(const unsigned char* ptr, ulint len,
   return true;
 }
 
-static void set_target_index_id(uint64_t id) {
-  g_target_index_id.high = static_cast<uint32_t>(id >> 32);
-  g_target_index_id.low = static_cast<uint32_t>(id & 0xffffffff);
-  g_found_target = true;
+static void set_target_index_id(parser_context_t* ctx, uint64_t id) {
+  if (ctx == nullptr) {
+    return;
+  }
+  ctx->target_index_id = id;
+  ctx->target_index_set = true;
 }
 
 static const IndexDef* find_index_by_name(const std::string& name) {
@@ -532,7 +530,15 @@ void print_sdi_indexes(FILE* out) {
   }
 }
 
-bool select_index_for_parsing(const std::string& selector, std::string* error) {
+bool select_index_for_parsing(parser_context_t* ctx,
+                              const std::string& selector,
+                              std::string* error) {
+  if (ctx == nullptr) {
+    if (error) {
+      *error = "Parser context is null";
+    }
+    return false;
+  }
   if (g_index_defs.empty()) {
     if (error) {
       *error = "SDI does not contain index definitions";
@@ -568,31 +574,38 @@ bool select_index_for_parsing(const std::string& selector, std::string* error) {
     return false;
   }
 
-  g_target_index_name = chosen->name;
-  g_target_index_root = chosen->root;
+  ctx->target_index_name = chosen->name;
+  ctx->target_index_root = chosen->root;
   if (chosen->id != 0) {
-    set_target_index_id(chosen->id);
+    set_target_index_id(ctx, chosen->id);
   } else {
-    g_found_target = false;
+    ctx->target_index_set = false;
   }
 
   return true;
 }
 
-page_no_t selected_index_root() {
-  return g_target_index_root;
+page_no_t selected_index_root(const parser_context_t* ctx) {
+  if (ctx == nullptr) {
+    return FIL_NULL;
+  }
+  return ctx->target_index_root;
 }
 
-const std::string& selected_index_name() {
-  return g_target_index_name;
+const std::string& selected_index_name(const parser_context_t* ctx) {
+  static const std::string empty;
+  if (ctx == nullptr) {
+    return empty;
+  }
+  return ctx->target_index_name;
 }
 
-bool target_index_is_set() {
-  return g_found_target;
+bool target_index_is_set(const parser_context_t* ctx) {
+  return ctx != nullptr && ctx->target_index_set;
 }
 
-void set_target_index_id_from_value(uint64_t id) {
-  set_target_index_id(id);
+void set_target_index_id_from_value(parser_context_t* ctx, uint64_t id) {
+  set_target_index_id(ctx, id);
 }
 
 // If you used "my_rec_offs_*" from the "undrop" style code:
@@ -807,13 +820,17 @@ void debug_print_compact_row(const page_t* page,
  *   Scans all pages to find the *first* root page
  *   (FIL_PAGE_INDEX + btr_root_fseg_validate() checks).
  *   Once found, read PAGE_INDEX_ID from that page
- *   and store in g_target_index_id. 
+ *   and store in the parser context.
  *
  *   Returns 0 if success, non-0 if error.
  */
 
-int discover_target_index_id(int fd)
+int discover_target_index_id(int fd, parser_context_t* ctx)
 {
+  if (ctx == nullptr) {
+    fprintf(stderr, "discover_target_index_id: parser context is null.\n");
+    return 1;
+  }
 
   // Determine page size via MySQL helper
   File mfd = (File)fd;
@@ -877,10 +894,12 @@ int discover_target_index_id(int fd)
       if (is_root) {
         // We consider the *first* root we find as the "Primary index"
         uint64_t idx_id_64 = read_uint64_from_page(page_data + PAGE_HEADER + PAGE_INDEX_ID);
-        set_target_index_id(idx_id_64);
+        set_target_index_id(ctx, idx_id_64);
+        const uint32_t high = static_cast<uint32_t>(ctx->target_index_id >> 32);
+        const uint32_t low = static_cast<uint32_t>(ctx->target_index_id & 0xffffffff);
 
         fprintf(stderr, "discover_target_index_id: Found root at page=%d  index_id=%u:%u\n",
-                i, g_target_index_id.high, g_target_index_id.low);
+                i, high, low);
 
         // done
         return 0;
@@ -893,18 +912,15 @@ int discover_target_index_id(int fd)
   return 1;
 }
 
-bool is_target_index(const unsigned char* page)
+bool is_target_index(const unsigned char* page, const parser_context_t* ctx)
 {
-  if (!g_found_target) {
+  if (ctx == nullptr || !ctx->target_index_set) {
     // We never discovered the target index => default to false
     return false;
   }
 
   uint64_t page_index_id = read_uint64_from_page(page + PAGE_HEADER + PAGE_INDEX_ID);
-  uint32_t high = static_cast<uint32_t>(page_index_id >> 32);
-  uint32_t low  = static_cast<uint32_t>(page_index_id & 0xffffffff);
-
-  return (high == g_target_index_id.high && low == g_target_index_id.low);
+  return page_index_id == ctx->target_index_id;
 }
 
 static std::string to_lower_copy(const std::string& in) {
@@ -1391,7 +1407,9 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
  *
  * Returns 0 on success, non-0 on error.
  */
-int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
+int load_ib2sdi_table_columns(const char* json_path,
+                              std::string& table_name,
+                              parser_context_t* ctx)
 {
     // 1) Open the file
     FILE* fp = std::fopen(json_path, "rb");
@@ -1561,14 +1579,16 @@ int load_ib2sdi_table_columns(const char* json_path, std::string& table_name)
     }
 
     bool have_indexes = parse_index_defs(dd_obj);
-    if (have_indexes) {
+    if (have_indexes && ctx != nullptr) {
         std::string err;
-        if (select_index_for_parsing("PRIMARY", &err) && !g_columns.empty()) {
+        if (select_index_for_parsing(ctx, "PRIMARY", &err) && !g_columns.empty()) {
             std::cout << "[Debug] Using PRIMARY index order for record parsing ("
                       << g_columns.size() << " columns).\n";
         } else {
             std::cerr << "[Warn] PRIMARY index order not found: " << err << "\n";
         }
+    } else if (have_indexes) {
+        std::cerr << "[Warn] PRIMARY index order not set (missing parser context).\n";
     }
 
     if (g_columns.empty()) {
@@ -1641,10 +1661,11 @@ static bool next_compact_rec_offset(const page_t* page,
 
 void parse_records_on_page(const unsigned char* page,
                            size_t page_size,
-                           uint64_t page_no)
+                           uint64_t page_no,
+                           const parser_context_t* ctx)
 {
   // 1) Check if this page belongs to the selected index
-  if (!is_target_index(page)) {
+  if (!is_target_index(page, ctx)) {
     return; // Not selected index => skip
   }
 
@@ -1655,8 +1676,9 @@ void parse_records_on_page(const unsigned char* page,
     return;
   }
 
+  const std::string index_name = ctx ? ctx->target_index_name : std::string();
   std::cout << "Page " << page_no
-            << " is index '" << g_target_index_name
+            << " is index '" << index_name
             << "' leaf. Parsing records.\n";
 
   // 3) Check if COMPACT or REDUNDANT
