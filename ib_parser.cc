@@ -615,11 +615,11 @@ static int do_parse_main(int argc, char** argv)
   }
 
   if (list_indexes) {
-    print_sdi_indexes(stdout);
+    print_sdi_indexes(&parser_ctx, stdout);
     return 0;
   }
 
-  if (has_sdi_index_definitions()) {
+  if (has_sdi_index_definitions(&parser_ctx)) {
     std::string err;
     if (!select_index_for_parsing(&parser_ctx, index_selector, &err)) {
       std::cerr << "Index selection failed: " << err << "\n";
@@ -630,9 +630,9 @@ static int do_parse_main(int argc, char** argv)
     return 1;
   }
 
-  // Build a table_def_t from g_columns
+  // Build a table_def_t from parser context columns
   static table_def_t my_table;
-  if (build_table_def_from_json(&my_table, table_name.c_str()) != 0) {
+  if (build_table_def_from_json(&my_table, table_name.c_str(), &parser_ctx) != 0) {
     std::cerr << "Failed to build table_def_t from JSON.\n";
     return 1;
   }
@@ -662,7 +662,7 @@ static int do_parse_main(int argc, char** argv)
   }
 
   if (!target_index_is_set(&parser_ctx)) {
-    if (index_selector_explicit && has_sdi_index_definitions()) {
+    if (index_selector_explicit && has_sdi_index_definitions(&parser_ctx)) {
       std::cerr << "Could not resolve index id for selected index '"
                 << selected_index_name(&parser_ctx) << "'.\n";
       ::close(sys_fd);

@@ -8,14 +8,53 @@
 #include <cstddef>
 #include <cstdio>
 #include <string>
+#include <vector>
 #include "page0page.h"
 #include "tables_dict.h"
+
+/** A minimal column-definition struct */
+struct MyColumnDef {
+  std::string name;            // e.g., "id", "name", ...
+  std::string type_utf8;       // e.g., "int", "char", "varchar"
+  uint32_t    char_length = 0;
+  uint32_t    collation_id = 0;
+  bool        is_nullable = false;
+  bool        is_unsigned = false;
+  bool        is_virtual = false;
+  int         hidden = 0;
+  int         ordinal_position = 0;
+  int         column_opx = -1;
+  int         numeric_precision = 0;
+  int         numeric_scale = 0;
+  int         datetime_precision = 0;
+  size_t      elements_count = 0;
+  std::vector<std::string> elements;
+  bool        elements_complete = false;
+};
+
+struct IndexElementDef {
+  int column_opx = -1;
+  uint32_t length = 0xFFFFFFFFu;
+  int ordinal_position = 0;
+  bool hidden = false;
+};
+
+struct IndexDef {
+  std::string name;
+  uint64_t id = 0;
+  page_no_t root = FIL_NULL;
+  std::vector<IndexElementDef> elements;
+  bool is_primary = false;
+};
 
 struct parser_context_t {
   uint64_t target_index_id;
   bool target_index_set;
   std::string target_index_name;
   page_no_t target_index_root;
+  std::vector<MyColumnDef> columns;
+  std::vector<MyColumnDef> columns_by_opx;
+  std::vector<IndexDef> index_defs;
 
   parser_context_t();
 };
@@ -33,10 +72,12 @@ int load_ib2sdi_table_columns(const char* json_path,
                               std::string& table_name,
                               parser_context_t* ctx);
 
-int build_table_def_from_json(table_def_t* table, const char* tbl_name);
+int build_table_def_from_json(table_def_t* table,
+                              const char* tbl_name,
+                              const parser_context_t* ctx);
 
-bool has_sdi_index_definitions();
-void print_sdi_indexes(FILE* out);
+bool has_sdi_index_definitions(const parser_context_t* ctx);
+void print_sdi_indexes(const parser_context_t* ctx, FILE* out);
 bool select_index_for_parsing(parser_context_t* ctx, const std::string& selector, std::string* error);
 page_no_t selected_index_root(const parser_context_t* ctx);
 const std::string& selected_index_name(const parser_context_t* ctx);

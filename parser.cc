@@ -76,46 +76,6 @@ struct XdesCache {
   }
 };
 
-/** A minimal column-definition struct */
-struct MyColumnDef {
-    std::string name;            // e.g., "id", "name", ...
-    std::string type_utf8;       // e.g., "int", "char", "varchar"
-    uint32_t    char_length = 0;
-    uint32_t    collation_id = 0;
-    bool        is_nullable = false;
-    bool        is_unsigned = false;
-    bool        is_virtual = false;
-    int         hidden = 0;
-    int         ordinal_position = 0;
-    int         column_opx = -1;
-    int         numeric_precision = 0;
-    int         numeric_scale = 0;
-    int         datetime_precision = 0;
-    size_t      elements_count = 0;
-    std::vector<std::string> elements;
-    bool        elements_complete = false;
-};
-
-struct IndexElementDef {
-    int column_opx = -1;
-    uint32_t length = 0xFFFFFFFFu;
-    int ordinal_position = 0;
-    bool hidden = false;
-};
-
-struct IndexDef {
-    std::string name;
-    uint64_t id = 0;
-    page_no_t root = FIL_NULL;
-    std::vector<IndexElementDef> elements;
-    bool is_primary = false;
-};
-
-/** We store the columns here, loaded from JSON. */
-static std::vector<MyColumnDef> g_columns;
-static std::vector<MyColumnDef> g_columns_by_opx;
-static std::vector<IndexDef> g_index_defs;
-
 static uint64_t read_be_uint(const unsigned char* ptr, size_t len);
 static int64_t read_be_int_signed(const unsigned char* ptr, size_t len);
 static std::string to_lower_copy(const std::string& in);
@@ -377,9 +337,13 @@ static void set_target_index_id(parser_context_t* ctx, uint64_t id) {
   ctx->target_index_set = true;
 }
 
-static const IndexDef* find_index_by_name(const std::string& name) {
+static const IndexDef* find_index_by_name(const parser_context_t* ctx,
+                                          const std::string& name) {
+  if (ctx == nullptr) {
+    return nullptr;
+  }
   const std::string needle = to_lower_copy(name);
-  for (const auto& idx : g_index_defs) {
+  for (const auto& idx : ctx->index_defs) {
     if (to_lower_copy(idx.name) == needle) {
       return &idx;
     }
@@ -387,8 +351,12 @@ static const IndexDef* find_index_by_name(const std::string& name) {
   return nullptr;
 }
 
-static const IndexDef* find_index_by_id(uint64_t id) {
-  for (const auto& idx : g_index_defs) {
+static const IndexDef* find_index_by_id(const parser_context_t* ctx,
+                                        uint64_t id) {
+  if (ctx == nullptr) {
+    return nullptr;
+  }
+  for (const auto& idx : ctx->index_defs) {
     if (idx.id == id && id != 0) {
       return &idx;
     }
@@ -396,13 +364,14 @@ static const IndexDef* find_index_by_id(uint64_t id) {
   return nullptr;
 }
 
-static bool build_index_columns(const IndexDef& idx,
+static bool build_index_columns(const parser_context_t* ctx,
+                                const IndexDef& idx,
                                 std::vector<MyColumnDef>* out_columns) {
-  if (out_columns == nullptr) {
+  if (ctx == nullptr || out_columns == nullptr) {
     return false;
   }
   out_columns->clear();
-  if (idx.elements.empty()) {
+  if (idx.elements.empty() || ctx->columns_by_opx.empty()) {
     return false;
   }
 
@@ -414,13 +383,13 @@ static bool build_index_columns(const IndexDef& idx,
 
   for (const auto& elem : elems) {
     if (elem.column_opx < 0 ||
-        elem.column_opx >= static_cast<int>(g_columns_by_opx.size())) {
+        elem.column_opx >= static_cast<int>(ctx->columns_by_opx.size())) {
       std::cerr << "[Warn] Index '" << idx.name
                 << "' refers to invalid column_opx=" << elem.column_opx << "\n";
       continue;
     }
 
-    MyColumnDef col = g_columns_by_opx[elem.column_opx];
+    MyColumnDef col = ctx->columns_by_opx[elem.column_opx];
     if (elem.length != 0xFFFFFFFFu && elem.length > 0) {
       if (col.char_length == 0 || elem.length < col.char_length) {
         col.char_length = elem.length;
@@ -432,8 +401,12 @@ static bool build_index_columns(const IndexDef& idx,
   return !out_columns->empty();
 }
 
-static bool parse_index_defs(const rapidjson::Value& dd_obj) {
-  g_index_defs.clear();
+static bool parse_index_defs(const rapidjson::Value& dd_obj,
+                             parser_context_t* ctx) {
+  if (ctx == nullptr) {
+    return false;
+  }
+  ctx->index_defs.clear();
   if (!dd_obj.HasMember("indexes") || !dd_obj["indexes"].IsArray()) {
     return false;
   }
@@ -488,11 +461,11 @@ static bool parse_index_defs(const rapidjson::Value& dd_obj) {
     }
 
     if (!def.name.empty() && !def.elements.empty()) {
-      g_index_defs.push_back(std::move(def));
+      ctx->index_defs.push_back(std::move(def));
     }
   }
 
-  return !g_index_defs.empty();
+  return !ctx->index_defs.empty();
 }
 
 static bool parse_index_selector(const std::string& selector, uint64_t* out) {
@@ -509,20 +482,20 @@ static bool parse_index_selector(const std::string& selector, uint64_t* out) {
   return true;
 }
 
-bool has_sdi_index_definitions() {
-  return !g_index_defs.empty();
+bool has_sdi_index_definitions(const parser_context_t* ctx) {
+  return ctx != nullptr && !ctx->index_defs.empty();
 }
 
-void print_sdi_indexes(FILE* out) {
+void print_sdi_indexes(const parser_context_t* ctx, FILE* out) {
   if (!out) {
     return;
   }
-  if (g_index_defs.empty()) {
+  if (ctx == nullptr || ctx->index_defs.empty()) {
     fprintf(out, "No indexes found in SDI.\n");
     return;
   }
   fprintf(out, "Indexes in SDI:\n");
-  for (const auto& idx : g_index_defs) {
+  for (const auto& idx : ctx->index_defs) {
     fprintf(out, "  - %s (id=%llu root=%u fields=%zu)\n",
             idx.name.c_str(),
             static_cast<unsigned long long>(idx.id),
@@ -540,7 +513,7 @@ bool select_index_for_parsing(parser_context_t* ctx,
     }
     return false;
   }
-  if (g_index_defs.empty()) {
+  if (ctx->index_defs.empty()) {
     if (error) {
       *error = "SDI does not contain index definitions";
     }
@@ -555,10 +528,10 @@ bool select_index_for_parsing(parser_context_t* ctx,
   const IndexDef* chosen = nullptr;
   uint64_t numeric_id = 0;
   if (parse_index_selector(sel, &numeric_id)) {
-    chosen = find_index_by_id(numeric_id);
+    chosen = find_index_by_id(ctx, numeric_id);
   }
   if (!chosen) {
-    chosen = find_index_by_name(sel);
+    chosen = find_index_by_name(ctx, sel);
   }
 
   if (!chosen) {
@@ -568,7 +541,7 @@ bool select_index_for_parsing(parser_context_t* ctx,
     return false;
   }
 
-  if (!build_index_columns(*chosen, &g_columns)) {
+  if (!build_index_columns(ctx, *chosen, &ctx->columns)) {
     if (error) {
       *error = "Failed to build columns for index '" + chosen->name + "'";
     }
@@ -1142,15 +1115,22 @@ static unsigned int internal_column_length(const std::string& name,
 
 /**
  * build_table_def_from_json():
- *   Creates a table_def_t from the columns in g_columns.
+ *   Creates a table_def_t from the columns in the parser context.
  *   This way, you can pass table_def_t into ibrec_init_offsets_new().
  *
  *   @param[out] table    The table_def_t to fill
  *   @param[in]  tbl_name The table name (e.g. "HISTORICO")
  *   @return 0 on success
  */
-int build_table_def_from_json(table_def_t* table, const char* tbl_name)
+int build_table_def_from_json(table_def_t* table,
+                              const char* tbl_name,
+                              const parser_context_t* ctx)
 {
+    if (ctx == nullptr || ctx->columns.empty()) {
+        fprintf(stderr, "[Error] Parser context has no columns loaded\n");
+        return 1;
+    }
+
     // 1) Zero out "table_def_t"
     std::memset(table, 0, sizeof(table_def_t));
 
@@ -1159,13 +1139,13 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
 
     // 3) Loop over columns
     unsigned colcount = 0;
-    for (size_t i = 0; i < g_columns.size(); i++) {
+    for (size_t i = 0; i < ctx->columns.size(); i++) {
         if (colcount >= MAX_TABLE_FIELDS) {
             fprintf(stderr, "[Error] Too many columns (>MAX_TABLE_FIELDS)\n");
             return 1;
         }
 
-        const MyColumnDef& col = g_columns[i];
+        const MyColumnDef& col = ctx->columns[i];
         field_def_t* fld = &table->fields[colcount];
         std::memset(fld, 0, sizeof(*fld));
 
@@ -1174,8 +1154,8 @@ int build_table_def_from_json(table_def_t* table, const char* tbl_name)
         fld->collation_id = col.collation_id;
 
         // (B) is_nullable => can_be_null
-        // If the JSON had is_nullable => g_columns[i].nullable, adapt.
-        // Let's assume we store is_nullable in g_columns[i].is_nullable:
+        // If the JSON had is_nullable => ctx->columns[i].nullable, adapt.
+        // Let's assume we store is_nullable in ctx->columns[i].is_nullable:
         fld->can_be_null = col.is_nullable;
 
         // (C) If the JSON had "is_unsigned" => store or adapt type
@@ -1439,6 +1419,11 @@ int load_ib2sdi_table_columns(const char* json_path,
                               std::string& table_name,
                               parser_context_t* ctx)
 {
+    if (ctx == nullptr) {
+        std::cerr << "[Error] Parser context is null.\n";
+        return 1;
+    }
+
     // 1) Open the file
     FILE* fp = std::fopen(json_path, "rb");
     if (!fp) {
@@ -1522,9 +1507,9 @@ int load_ib2sdi_table_columns(const char* json_path,
     }
 
     const rapidjson::Value& columns = dd_obj["columns"];
-    g_columns.clear();
-    g_columns_by_opx.clear();
-    g_columns_by_opx.resize(columns.Size());
+    ctx->columns.clear();
+    ctx->columns_by_opx.clear();
+    ctx->columns_by_opx.resize(columns.Size());
 
     // 5) Iterate the columns array
     for (rapidjson::SizeType i = 0; i < columns.Size(); ++i) {
@@ -1595,7 +1580,7 @@ int load_ib2sdi_table_columns(const char* json_path,
             }
         }
 
-        g_columns_by_opx[i] = def;
+        ctx->columns_by_opx[i] = def;
 
         std::cout << "[Debug] Added column: name='" << def.name
                   << "', type='" << def.type_utf8
@@ -1606,23 +1591,22 @@ int load_ib2sdi_table_columns(const char* json_path,
                   << "\n";
     }
 
-    bool have_indexes = parse_index_defs(dd_obj);
-    if (have_indexes && ctx != nullptr) {
+    bool have_indexes = parse_index_defs(dd_obj, ctx);
+    if (have_indexes) {
         std::string err;
-        if (select_index_for_parsing(ctx, "PRIMARY", &err) && !g_columns.empty()) {
+        if (select_index_for_parsing(ctx, "PRIMARY", &err) &&
+            !ctx->columns.empty()) {
             std::cout << "[Debug] Using PRIMARY index order for record parsing ("
-                      << g_columns.size() << " columns).\n";
+                      << ctx->columns.size() << " columns).\n";
         } else {
             std::cerr << "[Warn] PRIMARY index order not found: " << err << "\n";
         }
-    } else if (have_indexes) {
-        std::cerr << "[Warn] PRIMARY index order not set (missing parser context).\n";
     }
 
-    if (g_columns.empty()) {
+    if (ctx->columns.empty()) {
         std::vector<MyColumnDef> ordered;
-        ordered.reserve(g_columns_by_opx.size());
-        for (const auto& col : g_columns_by_opx) {
+        ordered.reserve(ctx->columns_by_opx.size());
+        for (const auto& col : ctx->columns_by_opx) {
             if (!col.is_virtual) {
                 ordered.push_back(col);
             }
@@ -1637,7 +1621,7 @@ int load_ib2sdi_table_columns(const char* json_path,
                                              : b.ordinal_position;
                              return a_pos < b_pos;
                          });
-        g_columns.swap(ordered);
+        ctx->columns.swap(ordered);
         std::cout << "[Warn] PRIMARY index order not found; using ordinal_position order.\n";
     }
 

@@ -389,8 +389,6 @@ IBD_API const char* ibd_get_page_type_name(uint16_t page_type) {
  * ============================================================================ */
 
 // Forward declarations from undrop_for_innodb
-extern table_def_t table_definitions[];
-extern int table_definitions_cnt;
 extern bool check_for_a_record(page_t *page, rec_t *rec, table_def_t *table, ulint *offsets);
 extern ulint my_rec_offs_nth_size(const ulint* offsets, ulint i);
 extern const unsigned char* my_rec_get_nth_field(const rec_t* rec, const ulint* offsets,
@@ -734,7 +732,9 @@ IBD_API ibd_result_t ibd_open_table(ibd_reader_t reader,
         }
 
         // Build table definition
-        if (build_table_def_from_json(&iter->table_def, iter->table_name.c_str()) != 0) {
+        if (build_table_def_from_json(&iter->table_def,
+                                      iter->table_name.c_str(),
+                                      &iter->parser_ctx) != 0) {
             iter->last_error = "Failed to build table definition";
             if (reader) reader->set_error(iter->last_error);
             delete iter;
@@ -743,10 +743,6 @@ IBD_API ibd_result_t ibd_open_table(ibd_reader_t reader,
 
         // Compute min/max sizes for record validation
         compute_table_sizes(&iter->table_def);
-
-        // Copy to global table_definitions for check_for_a_record
-        memcpy(&table_definitions[0], &iter->table_def, sizeof(table_def_t));
-        table_definitions_cnt = 1;
 
         // Open the IBD file
         iter->fd = open(ibd_path, O_RDONLY);
