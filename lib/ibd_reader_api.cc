@@ -496,15 +496,23 @@ static void compute_table_sizes(table_def_t* table, bool comp = true) {
     for (int j = 0; j < table->fields_count; j++) {
         field_def_t* fld = &table->fields[j];
 
+        const unsigned int field_min =
+            (fld->fixed_length > 0) ? static_cast<unsigned int>(fld->fixed_length)
+                                    : fld->min_length;
+        const unsigned int field_max =
+            (fld->fixed_length > 0) ? static_cast<unsigned int>(fld->fixed_length)
+                                    : fld->max_length;
+
         if (fld->can_be_null) {
             table->n_nullable++;
         } else {
-            table->data_min_size += fld->min_length + fld->fixed_length;
-            int size = (fld->fixed_length ? fld->fixed_length : fld->max_length);
-            table->min_rec_header_len += (size > 255 ? 2 : 1);
+            table->data_min_size += field_min;
+            if (fld->fixed_length == 0) {
+                table->min_rec_header_len += (field_max > 255 ? 2 : 1);
+            }
         }
 
-        table->data_max_size += fld->max_length + fld->fixed_length;
+        table->data_max_size += field_max;
     }
 
     table->min_rec_header_len += (table->n_nullable + 7) / 8;
