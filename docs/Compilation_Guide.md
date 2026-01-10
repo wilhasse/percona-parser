@@ -8,7 +8,7 @@ The project requires:
 1. System dependencies (development libraries)
 2. RapidJSON (header-only JSON library)
 3. Percona Server source code (partial build of required libraries only)
-4. percona-parser build
+4. innodb-parser build
 
 **Estimated time**: 20-40 minutes (depending on CPU cores)
 
@@ -28,7 +28,7 @@ After setup, the directory structure should look like:
     │           ├── libmysys.a
     │           ├── libstrings.a
     │           └── ...
-    └── percona-parser/         # This project
+    └── innodb-parser/         # This project
         └── build/
             ├── ib_parser
             └── libibd_reader.so
@@ -116,7 +116,7 @@ cmake .. \
 
 ## Step 5: Build Required Percona Server Libraries
 
-Build only the libraries needed by percona-parser (not the full server):
+Build only the libraries needed by innodb-parser (not the full server):
 
 ```bash
 make -j4 mysys strings innodb_zipdecompress lz4_lib perconaserverclient
@@ -145,15 +145,15 @@ You should see:
 - `libinnodb_zipdecompress.a` (~1.1 MB)
 - And other supporting libraries
 
-## Step 6: Clone percona-parser (if not already done)
+## Step 6: Clone innodb-parser (if not already done)
 
 ```bash
 cd /home/user/mysql
-git clone https://github.com/yourusername/percona-parser.git
-cd percona-parser
+git clone https://github.com/yourusername/innodb-parser.git
+cd innodb-parser
 ```
 
-## Step 7: Configure percona-parser Build
+## Step 7: Configure innodb-parser Build
 
 Verify the paths in `CMakeLists.txt` match your setup:
 
@@ -178,7 +178,7 @@ mkdir build && cd build
 cmake ..
 ```
 
-## Step 8: Build percona-parser
+## Step 8: Build innodb-parser
 
 ```bash
 make -j4
@@ -253,7 +253,7 @@ If cmake complains about missing libraries:
 | `Cannot find CURL` | `sudo apt-get install libcurl4-openssl-dev` |
 | `Cannot find system libraries` | Install the package mentioned in the error |
 
-### Linker errors during percona-parser build
+### Linker errors during innodb-parser build
 
 Ensure all Percona Server libraries were built:
 
@@ -292,8 +292,8 @@ mkdir build && cd build
 cmake .. -DDOWNLOAD_BOOST=1 -DWITH_BOOST=../boost -DWITHOUT_ROCKSDB=1 -DWITHOUT_TOKUDB=1
 make -j4 mysys strings innodb_zipdecompress lz4_lib perconaserverclient
 
-# 4. Build percona-parser
-cd /home/user/mysql/percona-parser
+# 4. Build innodb-parser
+cd /home/user/mysql/innodb-parser
 mkdir build && cd build
 cmake ..
 make -j4

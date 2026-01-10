@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Test runner for percona-parser
+# Test runner for innodb-parser
 # Usage: ./tests/run_tests.sh [--verbose]
 #
 

@@ -23,7 +23,7 @@ parent_directory/
 ├── percona-server/       # Percona Server source
 │   ├── build/           # Built binaries and libraries
 │   └── ...
-└── percona-parser/      # This project
+└── innodb-parser/      # This project
     └── ...
 ```
 
@@ -59,8 +59,8 @@ Note: The full build takes significant time (30-60 minutes). Only the core libra
 cd /path/to/parent_directory
 
 # Clone the repository (if not already done)
-git clone https://github.com/yourusername/percona-parser.git
-cd percona-parser
+git clone https://github.com/yourusername/innodb-parser.git
+cd innodb-parser
 
 # Install RapidJSON (required for parsing)
 cd ~
@@ -365,16 +365,16 @@ RUN mkdir build && cd build && \
 RUN git clone https://github.com/Tencent/rapidjson.git /rapidjson
 
 # Build InnoDB Reader
-COPY . /percona-parser
-WORKDIR /percona-parser
+COPY . /innodb-parser
+WORKDIR /innodb-parser
 RUN mkdir build && cd build && \
     cmake .. -DRAPIDJSON_INCLUDE_DIR=/rapidjson/include && \
     make -j$(nproc)
 
 # Set up runtime
-ENV LD_LIBRARY_PATH=/percona-parser/build
+ENV LD_LIBRARY_PATH=/innodb-parser/build
 WORKDIR /data
-ENTRYPOINT ["/percona-parser/build/ib_parser"]
+ENTRYPOINT ["/innodb-parser/build/ib_parser"]
 ```
 
 Build and run:

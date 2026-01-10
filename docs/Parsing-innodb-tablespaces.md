@@ -1,8 +1,8 @@
-# Parsing InnoDB Tablespaces with percona-parser (Lessons Learned)
+# Parsing InnoDB Tablespaces with innodb-parser (Lessons Learned)
 
 # Overview
 
-This guide summarizes how we parse MySQL 8 / Percona Server InnoDB .ibd files with percona-parser, what works, what does not, and the key lessons learned while rebuilding compressed tablespaces for re-import.
+This guide summarizes how we parse MySQL 8 / Percona Server InnoDB .ibd files with innodb-parser, what works, what does not, and the key lessons learned while rebuilding compressed tablespaces for re-import.
 
 The focus is single-table tablespaces (one .ibd per table). System tablespace (ibdata1), undo, and temp tablespaces are out of scope.
 
@@ -31,7 +31,7 @@ mysql -uroot mydb -e "UNLOCK TABLES;"
 ibd2sdi mytable.ibd > mytable_sdi.json
 ```
 
-The JSON is used as the schema source for percona-parser.
+The JSON is used as the schema source for innodb-parser.
 
 ## 3) Parse rows
 

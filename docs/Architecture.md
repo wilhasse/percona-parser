@@ -5,7 +5,7 @@ This document provides a detailed explanation of the Percona InnoDB Parser's arc
 ## Project Structure
 
 ```
-percona-parser/
+innodb-parser/
 ├── src/                    # Source files
 │   ├── ib_parser.cc       # Main entry point
 │   ├── decompress.cc      # Decompression logic

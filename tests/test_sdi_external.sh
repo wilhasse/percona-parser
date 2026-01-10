@@ -15,7 +15,7 @@ TABLE_NAME=${TABLE_NAME:-sdi_external}
 COLUMN_COUNT=${COLUMN_COUNT:-400}
 COLUMN_COMMENT_BYTES=${COLUMN_COMMENT_BYTES:-512}
 
-PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/percona-parser}
+PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/innodb-parser}
 IB_PARSER=${IB_PARSER:-$PARSER_DIR/build/ib_parser}
 OUT_DIR=${OUT_DIR:-/tmp/ibd-sdi-external}
 

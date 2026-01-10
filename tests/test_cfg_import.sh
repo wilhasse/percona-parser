@@ -13,7 +13,7 @@ DB_PASS=${DB_PASS:-}
 DB_NAME=${DB_NAME:-test_cfg_import}
 TABLE_NAME=${TABLE_NAME:-instant_cfg}
 
-PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/percona-parser}
+PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/innodb-parser}
 IB_PARSER=${IB_PARSER:-$PARSER_DIR/build/ib_parser}
 OUT_DIR=${OUT_DIR:-/tmp/ibd-cfg-import}
 

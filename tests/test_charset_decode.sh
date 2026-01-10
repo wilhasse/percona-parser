@@ -13,7 +13,7 @@ DB_PASS=${DB_PASS:-}
 DB_NAME=${DB_NAME:-test_charset_decode}
 TABLE_NAME=${TABLE_NAME:-charset_fixture}
 
-PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/percona-parser}
+PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/innodb-parser}
 IB_PARSER=${IB_PARSER:-$PARSER_DIR/build/ib_parser}
 OUT_IBD=${OUT_IBD:-$PARSER_DIR/tests/charset_test.ibd}
 OUT_SDI=${OUT_SDI:-$PARSER_DIR/tests/charset_test_sdi.json}

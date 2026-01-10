@@ -14,7 +14,7 @@ SRC_DB=${SRC_DB:-test_index_remap_src}
 TGT_DB=${TGT_DB:-test_index_remap_tgt}
 TABLE_NAME=${TABLE_NAME:-remap_tbl}
 
-PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/percona-parser}
+PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/innodb-parser}
 IB_PARSER=${IB_PARSER:-$PARSER_DIR/build/ib_parser}
 OUT_DIR=${OUT_DIR:-/tmp/ibd-index-remap}
 

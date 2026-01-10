@@ -2584,7 +2584,7 @@ static bool write_cfg_file(const char* path, const CfgTable& cfg) {
   }
 
   char hostbuf[256];
-  std::string hostname = "percona-parser";
+  std::string hostname = "innodb-parser";
   if (gethostname(hostbuf, sizeof(hostbuf)) == 0) {
     hostbuf[sizeof(hostbuf) - 1] = '\0';
     if (hostbuf[0] != '\0') {

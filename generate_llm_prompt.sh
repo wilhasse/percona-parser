@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to generate a single file with all C++ source code for LLM prompting
-# This creates a consolidated view of the percona-parser codebase for analysis
+# This creates a consolidated view of the innodb-parser codebase for analysis
 # Includes .cc, .h files and documentation
 
 # Colors for output
@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 # Output configuration
 OUTPUT_DIR="."
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-OUTPUT_FILE="percona-parser-codebase-${TIMESTAMP}.txt"
+OUTPUT_FILE="innodb-parser-codebase-${TIMESTAMP}.txt"
 
 # Function to print colored output
 print_color() {
@@ -23,7 +23,7 @@ print_color() {
     echo -e "${color}$@${NC}"
 }
 
-echo "📦 Generating consolidated percona-parser codebase for LLM prompting..."
+echo "📦 Generating consolidated innodb-parser codebase for LLM prompting..."
 
 # Function to add a file with header
 add_file() {
@@ -155,4 +155,4 @@ print_color $GREEN ""
 print_color $GREEN "You can now use this file to prompt an LLM with the complete codebase context."
 print_color $YELLOW ""
 print_color $YELLOW "💡 Tip: Add this file to .gitignore to avoid committing it:"
-print_color $YELLOW "    echo 'percona-parser-codebase-*.txt' >> .gitignore"
+print_color $YELLOW "    echo 'innodb-parser-codebase-*.txt' >> .gitignore"

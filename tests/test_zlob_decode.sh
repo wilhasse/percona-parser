@@ -16,7 +16,7 @@ TABLE_NAME=${TABLE_NAME:-zlob_fixture}
 TZ_NAME=${TZ_NAME:-America/Sao_Paulo}
 KEY_BLOCK_SIZE=${KEY_BLOCK_SIZE:-8}
 
-PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/percona-parser}
+PARSER_DIR=${PARSER_DIR:-/home/cslog/mysql/innodb-parser}
 IB_PARSER=${IB_PARSER:-$PARSER_DIR/build/ib_parser}
 OUT_IBD=${OUT_IBD:-$PARSER_DIR/tests/zlob_test.ibd}
 OUT_SDI=${OUT_SDI:-$PARSER_DIR/tests/zlob_test_sdi.json}
