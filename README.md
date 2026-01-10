@@ -1,4 +1,4 @@
-# Percona InnoDB Parser
+# InnoDB Parser
 
 Offline tooling to decrypt, decompress, and parse MySQL 8 / Percona Server
 InnoDB single-table tablespaces (.ibd) for recovery and research.
