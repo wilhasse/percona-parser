@@ -11,8 +11,10 @@
  */
 #include <cstdio>
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <cctype>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -137,6 +139,157 @@ my_rec_get_nth_field(const rec_t* rec, const ulint* offsets,
 }
 
 /** check_fields_sizes() => minimal check for each field. */
+static bool trace_offsets_enabled() {
+  static int cached = -1;
+  if (cached != -1) {
+    return cached == 1;
+  }
+  const char* env = std::getenv("IB_PARSER_TRACE_OFFSETS");
+  cached = (env && *env && std::strcmp(env, "0") != 0) ? 1 : 0;
+  return cached == 1;
+}
+
+static bool should_trace_offsets() {
+  if (!parser_debug_enabled() || !trace_offsets_enabled()) {
+    return false;
+  }
+  static int remaining = -1;
+  if (remaining < 0) {
+    const char* env = std::getenv("IB_PARSER_TRACE_LIMIT");
+    if (!env || *env == '\0') {
+      remaining = 1;
+    } else {
+      char* end = nullptr;
+      long val = std::strtol(env, &end, 10);
+      if (end == env || val <= 0) {
+        remaining = 0;
+      } else {
+        remaining = static_cast<int>(val);
+      }
+    }
+  }
+  if (remaining == 0) {
+    return false;
+  }
+  --remaining;
+  return true;
+}
+
+static void debug_trace_offsets(const rec_t* rec, const table_def_t* table) {
+  if (!should_trace_offsets() || rec == nullptr || table == nullptr) {
+    return;
+  }
+
+  std::fprintf(stderr, "=== Offset trace ===\n");
+  std::fprintf(stderr, "table=%s fields=%u rec=%p\n",
+               table->name ? table->name : "(null)",
+               table->fields_count,
+               static_cast<const void*>(rec));
+
+  ulint status = rec_get_status((rec_t*)rec);
+  ulint info_bits = rec_get_info_bits(rec, true);
+  std::fprintf(stderr, "rec_status=%lu info_bits=0x%02lx n_nullable=%u\n",
+               static_cast<unsigned long>(status),
+               static_cast<unsigned long>(info_bits),
+               table->n_nullable);
+
+  const unsigned char* nulls = (const unsigned char*)rec - (REC_N_NEW_EXTRA_BYTES + 1);
+  if (info_bits & REC_INFO_VERSION_FLAG) {
+    nulls -= 1;
+  } else if (info_bits & REC_INFO_INSTANT_FLAG) {
+    uint16_t len = 1;
+    if ((*nulls & REC_N_FIELDS_TWO_BYTES_FLAG) != 0) {
+      len = 2;
+    }
+    nulls -= len;
+  }
+  const unsigned char* lens = nulls - ((table->n_nullable + 7) / 8);
+  ptrdiff_t nulls_off = (const unsigned char*)rec - nulls;
+  ptrdiff_t lens_off = (const unsigned char*)rec - lens;
+  std::fprintf(stderr, "nulls_off=%td lens_off=%td\n", nulls_off, lens_off);
+
+  ulint offs = 0;
+  unsigned char null_mask = 1;
+
+  for (ulint i = 0; i < (ulint)table->fields_count; i++) {
+    const field_def_t* fld = &table->fields[i];
+    bool is_null = false;
+    if (fld->can_be_null) {
+      if (null_mask == 0) {
+        nulls--;
+        null_mask = 1;
+      }
+      if ((*nulls & null_mask) != 0) {
+        is_null = true;
+      }
+      null_mask <<= 1;
+    }
+
+    ulint start = offs;
+    bool is_extern = false;
+    unsigned int len_bytes = 0;
+    unsigned int raw1 = 0;
+    unsigned int raw2 = 0;
+
+    if (is_null) {
+      // no length bytes stored
+    } else if (fld->fixed_length == 0) {
+      len_bytes = 1;
+      raw1 = static_cast<unsigned int>(*lens--);
+      ulint lenbyte = raw1;
+      if (fld->max_length > 255
+          || fld->type == FT_BLOB
+          || fld->type == FT_TEXT
+          || fld->type == FT_JSON) {
+        if (lenbyte & 0x80) {
+          len_bytes = 2;
+          raw2 = static_cast<unsigned int>(*lens--);
+          lenbyte = (lenbyte << 8) | raw2;
+          offs += (lenbyte & 0x3fff);
+          is_extern = (lenbyte & 0x4000) != 0;
+        } else {
+          offs += lenbyte;
+        }
+      } else {
+        offs += lenbyte;
+      }
+    } else {
+      offs += (ulint)fld->fixed_length;
+    }
+
+    offs &= 0xffff;
+    ulint field_len = is_null ? UNIV_SQL_NULL : (offs - start);
+
+    std::fprintf(stderr,
+                 "  [%2lu] %-24s type=%d null=%s fixed=%d min=%u max=%u start=%lu end=%lu ",
+                 static_cast<unsigned long>(i),
+                 fld->name ? fld->name : "(null)",
+                 fld->type,
+                 is_null ? "true" : "false",
+                 fld->fixed_length,
+                 fld->min_length,
+                 fld->max_length,
+                 static_cast<unsigned long>(start),
+                 static_cast<unsigned long>(offs));
+    if (field_len == UNIV_SQL_NULL) {
+      std::fprintf(stderr, "len=NULL");
+    } else {
+      std::fprintf(stderr, "len=%lu", static_cast<unsigned long>(field_len));
+    }
+    if (len_bytes > 0) {
+      std::fprintf(stderr, " len_bytes=%u raw=0x%02X",
+                   len_bytes, raw1);
+      if (len_bytes == 2) {
+        std::fprintf(stderr, " raw2=0x%02X ext=%d",
+                     raw2, is_extern ? 1 : 0);
+      }
+    }
+    std::fprintf(stderr, "\n");
+  }
+
+  std::fprintf(stderr, "=== End offset trace ===\n");
+}
+
 inline bool check_fields_sizes(const rec_t* rec, table_def_t* table, ulint* offsets)
 {
   // remove "ulint n = offsets[0]" since we don't use it
@@ -154,6 +307,7 @@ inline bool check_fields_sizes(const rec_t* rec, table_def_t* table, ulint* offs
         printf("ERROR: field #%lu => length %lu out of [%u..%u]\n",
                (unsigned long)i, (unsigned long)field_len,
                table->fields[i].min_length, table->fields[i].max_length);
+        debug_trace_offsets(rec, table);
         return false;
       }
     }
@@ -188,7 +342,7 @@ inline bool ibrec_init_offsets_new(const page_t* page,
   const unsigned char* lens  = nulls - ((table->n_nullable + 7) / 8);
 
   ulint offs = 0;
-  ulint null_mask = 1;
+  unsigned char null_mask = 1;
 
   for (ulint i = 0; i < (ulint)table->fields_count; i++) {
     field_def_t* fld = &table->fields[i];

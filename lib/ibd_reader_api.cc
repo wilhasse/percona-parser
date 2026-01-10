@@ -7,6 +7,7 @@
 #include <string>
 #include <memory>
 #include <queue>
+#include <vector>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -24,6 +25,50 @@
 #include "../decrypt.h"
 #include "../parser.h"
 #include "../my_keyring_lookup.h"
+
+static bool read_index_id_from_root_fd(int fd,
+                                       page_no_t root,
+                                       size_t physical_size,
+                                       size_t logical_size,
+                                       bool tablespace_compressed,
+                                       uint64_t* out) {
+    if (root == FIL_NULL || out == nullptr) {
+        return false;
+    }
+
+    std::vector<unsigned char> page_buf(physical_size);
+    std::vector<unsigned char> logical_buf;
+    if (tablespace_compressed) {
+        logical_buf.resize(logical_size);
+    }
+
+    const off_t offset = static_cast<off_t>(root) *
+                         static_cast<off_t>(physical_size);
+    if (pread(fd, page_buf.data(), physical_size, offset) !=
+        static_cast<ssize_t>(physical_size)) {
+        return false;
+    }
+
+    const unsigned char* page_data = page_buf.data();
+    if (tablespace_compressed) {
+        size_t actual_size = 0;
+        if (!decompress_page_inplace(page_buf.data(), physical_size, logical_size,
+                                     logical_buf.data(), logical_size, &actual_size)) {
+            return false;
+        }
+        if (actual_size != logical_size) {
+            return false;
+        }
+        page_data = logical_buf.data();
+    }
+
+    if (fil_page_get_type(page_data) != FIL_PAGE_INDEX) {
+        return false;
+    }
+
+    *out = mach_read_from_8(page_data + PAGE_HEADER + PAGE_INDEX_ID);
+    return true;
+}
 
 // Reader context structure
 struct ibd_reader {
@@ -790,12 +835,29 @@ IBD_API ibd_result_t ibd_open_table(ibd_reader_t reader,
         }
         iter->total_pages = st.st_size / iter->physical_page_size;
 
-        // Discover target index
-        if (discover_target_index_id(iter->fd, &iter->parser_ctx) != 0) {
-            iter->last_error = "Cannot discover index ID";
-            if (reader) reader->set_error(iter->last_error);
-            delete iter;
-            return IBD_ERROR_INVALID_FORMAT;
+        if (!target_index_is_set(&iter->parser_ctx)) {
+            page_no_t root = selected_index_root(&iter->parser_ctx);
+            if (root != FIL_NULL) {
+                uint64_t idx_id = 0;
+                if (read_index_id_from_root_fd(iter->fd,
+                                               root,
+                                               iter->physical_page_size,
+                                               iter->logical_page_size,
+                                               iter->tablespace_compressed,
+                                               &idx_id)) {
+                    set_target_index_id_from_value(&iter->parser_ctx, idx_id);
+                }
+            }
+        }
+
+        // Discover target index (fallback if SDI didn't provide one)
+        if (!target_index_is_set(&iter->parser_ctx)) {
+            if (discover_target_index_id(iter->fd, &iter->parser_ctx) != 0) {
+                iter->last_error = "Cannot discover index ID";
+                if (reader) reader->set_error(iter->last_error);
+                delete iter;
+                return IBD_ERROR_INVALID_FORMAT;
+            }
         }
 
         iter->current_page = 0;
