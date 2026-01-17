@@ -183,6 +183,7 @@ static void usage() {
             << "  ib_parser 2 <in_file.ibd> <out_file>\n"
             << "  ib_parser 3 <in_file.ibd> <table_def.json> [--index=NAME|ID] [--list-indexes]\n"
             << "    [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n"
+            << "    [--raw-integers] [--skip-xdes] [--skip-page-check] [--debug]\n"
             << "  ib_parser 4 <master_key_id> <server_uuid> <keyring_file> <ibd_path> <dest_path>\n"
             << "  ib_parser 5 <in_file.ibd> <out_file> [--sdi-json=PATH]\n"
             << "    [--target-sdi-json=PATH] [--index-id-map=PATH] [--cfg-out=PATH]\n"
@@ -504,7 +505,8 @@ static int do_parse_main(int argc, char** argv)
   if (argc < 3) {
     std::cerr << "Usage for mode=3 (parse-only):\n"
               << "  ib_parser 3 <in_file.ibd> <table_def.json> [--index=NAME|ID] [--list-indexes]\n"
-              << "    [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n";
+              << "    [--format=pipe|csv|jsonl] [--output=PATH] [--with-meta] [--lob-max-bytes=N]\n"
+              << "    [--raw-integers] [--skip-xdes] [--debug]\n";
     return 1;
   }
 
@@ -514,6 +516,9 @@ static int do_parse_main(int argc, char** argv)
   std::string index_selector;
   bool index_selector_explicit = false;
   bool list_indexes = false;
+  bool skip_xdes = false;
+  bool skip_page_check = false;
+  bool debug_mode = false;
   RowOutputOptions output_opts;
   output_opts.format = ROW_OUTPUT_PIPE;
   output_opts.include_meta = false;
@@ -599,6 +604,22 @@ static int do_parse_main(int argc, char** argv)
       }
       output_opts.lob_max_bytes =
           static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (arg == "--raw-integers") {
+      output_opts.raw_integers = true;
+      continue;
+    }
+    if (arg == "--skip-xdes") {
+      skip_xdes = true;
+      continue;
+    }
+    if (arg == "--skip-page-check") {
+      skip_page_check = true;
+      continue;
+    }
+    if (arg == "--debug") {
+      debug_mode = true;
       continue;
     }
     std::cerr << "Unknown argument: " << arg << "\n";
@@ -781,24 +802,34 @@ static int do_parse_main(int argc, char** argv)
 
     const uint32_t on_disk_page_no =
         mach_read_from_4(page_buf.get() + FIL_PAGE_OFFSET);
-    if (on_disk_page_no != page_no) {
+    if (!skip_page_check && on_disk_page_no != page_no) {
       page_no++;
       continue;
     }
 
     const uint16_t page_type = mach_read_from_2(page_buf.get() + FIL_PAGE_TYPE);
+    if (debug_mode) {
+      fprintf(stderr, "DEBUG: page=%lu, type=%u, FIL_PAGE_INDEX=%u\n",
+              (unsigned long)page_no, page_type, (unsigned)FIL_PAGE_INDEX);
+    }
     if (page_type == FIL_PAGE_TYPE_XDES ||
         page_type == FIL_PAGE_TYPE_FSP_HDR) {
       xdes_cache.update(page_no, page_buf.get(), physical_page_size);
     }
 
     load_xdes_page(page_no);
-    if (xdes_cache.is_free(page_no, pg_sz)) {
+    if (!skip_xdes && xdes_cache.is_free(page_no, pg_sz)) {
+      if (debug_mode) {
+        fprintf(stderr, "DEBUG: page=%lu marked free by xdes\n", (unsigned long)page_no);
+      }
       page_no++;
       continue;
     }
 
     if (page_type != FIL_PAGE_INDEX) {
+      if (debug_mode) {
+        fprintf(stderr, "DEBUG: page=%lu skipped - not INDEX type\n", (unsigned long)page_no);
+      }
       page_no++;
       continue;
     }
@@ -827,6 +858,12 @@ static int do_parse_main(int argc, char** argv)
     if (!page_is_comp(parse_buf)) {
       page_no++;
       continue;
+    }
+
+    if (debug_mode) {
+      fprintf(stderr, "DEBUG: page_no=%lu, target_index_set=%d, target_index_id=%lu\n",
+              (unsigned long)page_no, (int)parser_ctx.target_index_set,
+              (unsigned long)parser_ctx.target_index_id);
     }
 
     parse_records_on_page(parse_buf, parse_size, page_no, &parser_ctx);

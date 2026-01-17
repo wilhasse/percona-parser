@@ -28,7 +28,22 @@ Extract SDI and parse rows:
 ibd2sdi table.ibd > table_sdi.json
 ./build/ib_parser 3 table.ibd table_sdi.json --format=jsonl --output=rows.jsonl
 ./build/ib_parser 3 table.ibd table_sdi.json --index=idx_ab --format=jsonl
+./build/ib_parser 3 table.ibd table_sdi.json --list-indexes
 ```
+
+### Mode 3 Parse Options
+
+| Option | Description |
+|--------|-------------|
+| `--index=NAME\|ID` | Select index by name or numeric ID (default: PRIMARY) |
+| `--list-indexes` | List available indexes and exit |
+| `--format=pipe\|csv\|jsonl` | Output format (default: pipe) |
+| `--output=PATH` | Write output to file instead of stdout |
+| `--with-meta` | Include row metadata (page_no, offset, deleted flag) |
+| `--lob-max-bytes=N` | Maximum LOB bytes to read (default: 4MB) |
+| `--raw-integers` | Skip InnoDB sign-bit decoding (for test/synthetic files) |
+| `--skip-xdes` | Skip extent descriptor free-page validation |
+| `--debug` | Enable verbose debug output |
 
 Decompress or rebuild:
 ```bash

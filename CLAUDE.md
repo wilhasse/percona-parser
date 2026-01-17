@@ -39,7 +39,18 @@ sudo systemctl restart mysql
 ./build/ib_parser 2 <input.ibd> <output.ibd>
 
 # Mode 3: Parse with table definition
-./build/ib_parser 3 <table.ibd> <table_definition.json>
+./build/ib_parser 3 <table.ibd> <table_definition.json> [options]
+
+# Mode 3 options:
+#   --index=NAME|ID     Select index by name or numeric ID
+#   --list-indexes      List available indexes and exit
+#   --format=pipe|csv|jsonl  Output format (default: pipe)
+#   --output=PATH       Write output to file instead of stdout
+#   --with-meta         Include row metadata (page_no, offset, deleted flag)
+#   --lob-max-bytes=N   Maximum LOB bytes to read (default: 4MB)
+#   --raw-integers      Skip InnoDB sign-bit decoding (for test files)
+#   --skip-xdes         Skip extent descriptor free-page validation
+#   --debug             Enable verbose debug output
 
 # Mode 4: Decrypt then decompress
 ./build/ib_parser 4 <key_id> <server_uuid> <keyring_file> <input.ibd> <output.ibd>

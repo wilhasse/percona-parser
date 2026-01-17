@@ -460,11 +460,27 @@ static uint64_t read_be_uint(const unsigned char* ptr, size_t len) {
   return val;
 }
 
+// Read signed big-endian integer with InnoDB sign-bit decoding
+// InnoDB stores signed integers with the high bit flipped for B-tree ordering
 static int64_t read_be_int_signed(const unsigned char* ptr, size_t len) {
   if (len == 0 || len > 8) {
     return 0;
   }
   uint64_t val = read_be_uint(ptr, len);
+
+  // If raw_integers mode, skip InnoDB sign-bit decoding
+  if (g_row_output.raw_integers) {
+    // Treat as plain signed big-endian
+    uint64_t sign_bit = 1ULL << (len * 8 - 1);
+    if (val & sign_bit) {
+      // Sign extend for negative values
+      uint64_t mask = ~0ULL << (len * 8);
+      val |= mask;
+    }
+    return static_cast<int64_t>(val);
+  }
+
+  // Standard InnoDB decoding: flip the sign bit
   uint64_t sign_mask = 1ULL << (len * 8 - 1);
   val ^= sign_mask;
   if (val & sign_mask && len < 8) {

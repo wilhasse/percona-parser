@@ -17,6 +17,7 @@ struct RowOutputOptions {
   bool include_meta = false;
   FILE* out = nullptr;
   size_t lob_max_bytes = 4 * 1024 * 1024;
+  bool raw_integers = false;  // Skip InnoDB sign-bit decoding for test files
 };
 
 struct RowMeta {
